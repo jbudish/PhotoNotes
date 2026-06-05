@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>PhotoNotes</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap');
+
+  :root {
+    --bg: #ffffff;
+    --surface: #f5f5f5;
+    --surface2: #eeeeee;
+    --border: #e0e0e0;
+    --accent: #111111;
+    --accent-dim: #333333;
+    --text: #111111;
+    --text-muted: #888888;
+    --danger: #d32f2f;
+    --good: #2e7d32;
+    --radius: 12px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+  html, body {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  #app {
+    width: 100%;
+    max-width: 480px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+  }
+
+  /* ── Header ── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px 12px;
+    flex-shrink: 0;
+  }
+
+  .logo {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    color: #111111;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+
+  .session-info {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    color: var(--text-muted);
+    text-align: right;
+    line-height: 1.5;
+  }
+
+  .settings-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 5px 9px;
+    font-size: 14px;
+    transition: all 0.15s;
+    line-height: 1;
+  }
+  .settings-btn:hover { border-color: #111111; color: #111111; }
+
+  /* ── Screens ── */
+  .screen {
+    display: none;
+    flex-direction: column;
+    flex: 1;
+    padding: 0 20px 16px;
+    overflow: hidden;
+  }
+  .screen.active { display: flex; }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .screen.active { animation: fadeIn 0.2s ease; }
+
+  .screen-title {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    flex-shrink: 0;
+  }
+
+  /* ── Form fields ── */
+  .field-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .field-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-muted);
+    font-family: 'DM Mono', monospace;
+  }
+
+  .field-input {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 15px;
+    width: 100%;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .field-input:focus { border-color: #111111; }
+  .field-input::placeholder { color: #bbb; }
+  select.field-input[data-empty="true"] { color: #bbb; }
+  select.field-input { appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 14px center; padding-right: 36px; cursor: pointer; }
+
+  /* ── Buttons ── */
+  .btn {
+    padding: 13px 20px;
+    border-radius: var(--radius);
+    border: none;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex-shrink: 0;
+    width: 100%;
+  }
+  .btn-primary { background: #111111; color: #ffffff; }
+  .btn-primary:hover { background: #333333; }
+  .btn-primary:active { transform: scale(0.98); }
+  .btn-secondary { background: #ffffff; color: #111111; border: 1px solid #d0d0d0; }
+  .btn-secondary:hover { background: #f5f5f5; }
+  .btn-secondary:active { transform: scale(0.98); }
+  .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+
+  .btn-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+
+  /* ── Photo zone ── */
+  .photo-zone {
+    background: var(--surface);
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+    height: 160px;
+  }
+  .photo-zone:hover, .photo-zone:active { border-color: #111111; }
+  .photo-zone img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: calc(var(--radius) - 2px); }
+  .photo-zone .overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; border-radius: calc(var(--radius) - 2px); }
+  .photo-zone p { font-size: 13px; color: var(--text-muted); }
+  .photo-zone .hint { font-size: 11px; color: #aaa; }
+  .camera-icon { width: 36px; height: 36px; color: var(--text-muted); }
+
+  input[type="file"] { display: none; }
+
+  /* ── Spacer ── */
+  .gap { flex-shrink: 0; }
+
+  /* ── Settings ── */
+  .url-input {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    width: 100%;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .url-input:focus { border-color: #111111; }
+  .url-input::placeholder { color: #bbb; font-size: 12px; font-family: 'DM Sans', sans-serif; }
+
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 13px;
+    flex-shrink: 0;
+  }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+  .status-dot.connected { background: #2e7d32; box-shadow: 0 0 6px #2e7d32; }
+  .status-dot.error { background: var(--danger); }
+
+  .info-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+    flex: 1;
+  }
+  .step-row { display: flex; gap: 10px; align-items: flex-start; }
+  .step-num { font-family: 'DM Mono', monospace; font-size: 10px; color: #111111; background: #f0f0f0; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .step-text { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+  .step-text strong { color: var(--text); }
+  .code-inline { font-family: 'DM Mono', monospace; font-size: 10px; background: #f0f0f0; border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; color: #111111; }
+
+
+  /* ── Session log ── */
+  .log-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+  .log-cat { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .log-note { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .log-photo-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    color: var(--text-muted);
+    white-space: nowrap;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+  .log-photo-btn:hover { border-color: #111; color: #111; }
+  .log-photo-btn.no-photo { opacity: 0.3; cursor: default; pointer-events: none; }
+  /* ── Send status ── */
+  .send-toast {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    font-size: 13px;
+    flex-shrink: 0;
+  }
+  .send-toast.sending { background: rgba(232,255,71,0.05); border-color: rgba(232,255,71,0.2); color: #111111; }
+  .send-toast.sent { background: #e8f5e9; border-color: #388e3c; color: #2e7d32; }
+  .send-toast.failed { background: #ffebee; border-color: #c62828; color: #c62828; }
+
+  .spinner { width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; opacity: 0.6; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .divider { height: 1px; background: var(--border); width: 100%; flex-shrink: 0; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div class="header">
+    <div class="logo" onclick="showScreen('screen-session')" style="cursor:pointer;">PhotoNotes</div>
+    <div id="headerRight">
+      <button class="settings-btn" onclick="showScreen('screen-settings')" title="Settings">⚙</button>
+    </div>
+  </div>
+
+  <!-- ── SETTINGS ── -->
+  <div class="screen" id="screen-settings">
+    <div class="screen-title">Google Sheets Setup</div>
+
+    <div class="info-box">
+      <div class="step-row">
+        <div class="step-num">1</div>
+        <div class="step-text">Open your Google Sheet → <strong>Extensions → Apps Script</strong></div>
+      </div>
+      <div class="step-row">
+        <div class="step-num">2</div>
+        <div class="step-text">Delete existing code. Paste the <strong>google-apps-script.js</strong> file contents.</div>
+      </div>
+      <div class="step-row">
+        <div class="step-num">3</div>
+        <div class="step-text"><strong>Deploy → New deployment</strong> · Type: <span class="code-inline">Web app</span> · Who has access: <span class="code-inline">Anyone</span></div>
+      </div>
+      <div class="step-row">
+        <div class="step-num">4</div>
+        <div class="step-text">Click <strong>Advanced → Go to script</strong> to authorize. Copy the Web App URL.</div>
+      </div>
+      <div class="step-row">
+        <div class="step-num">5</div>
+        <div class="step-text">Paste the URL below and tap <strong>Save</strong>.</div>
+      </div>
+    </div>
+
+    <div class="gap" style="height:10px"></div>
+    <div class="field-group">
+      <div class="field-label">Web App URL</div>
+      <input class="url-input" id="sheetsUrlInput" type="url" placeholder="https://script.google.com/macros/s/...">
+    </div>
+    <div class="gap" style="height:8px"></div>
+    <div class="status-row">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">No URL saved yet</span>
+    </div>
+    <div class="gap" style="height:8px"></div>
+    <button class="btn btn-primary" onclick="saveSheetUrl()">Save URL</button>
+    <div class="gap" style="height:8px"></div>
+    <button class="btn btn-secondary" onclick="testSheetConnection()">Test Connection</button>
+    <div class="gap" style="height:8px"></div>
+    <button class="btn btn-secondary" onclick="goBack()">← Back</button>
+  </div>
+
+  <!-- ── SCREEN 1: Session Setup ── -->
+  <div class="screen active" id="screen-session">
+
+    <div class="field-group">
+      <div class="field-label">Property</div>
+      <input class="field-input" id="inputProperty" type="text" maxlength="30" placeholder="e.g. Maple Terrace, Elmwood...">
+    </div>
+    <div class="gap" style="height:12px"></div>
+    <div class="field-group">
+      <div class="field-label">Location</div>
+      <div style="display:flex;gap:8px;align-items:stretch;">
+        <button id="geoBtn" onclick="fillLocation()" style="flex-shrink:0;width:46px;height:46px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:border-color 0.15s;" title="Use my location">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#555" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="7" stroke-dasharray="2 2"/></svg>
+        </button>
+        <input class="field-input" id="inputLocation" type="text" placeholder="manually add address" style="flex:1;">
+      </div>
+    </div>
+    <div class="gap" style="height:12px"></div>
+    <div class="field-group">
+      <div class="field-label">Your Name</div>
+      <select class="field-input" id="inputName" data-empty="true" onchange="toggleOtherName(this)">
+        <option value="">Select name...</option>
+        <option value="Jeff">Jeff</option>
+        <option value="Ted">Ted</option>
+        <option value="Dylan">Dylan</option>
+        <option value="Mack">Mack</option>
+        <option value="Lacey">Lacey</option>
+        <option value="Other">Other</option>
+      </select>
+      <input class="field-input" id="inputNameOther" type="text" maxlength="30" placeholder="Enter name..." style="display:none;margin-top:8px;">
+    </div>
+
+    <div class="gap" style="height:12px"></div>
+    <div class="field-group">
+      <div class="field-label">&nbsp;</div>
+      <button class="btn btn-primary" onclick="startSession()">Start →</button>
+    </div>
+  </div>
+
+
+  <!-- ── SCREEN 2: Photo + Details ── -->
+  <div class="screen" id="screen-photo">
+
+    <div class="photo-zone" id="photoZone" onclick="document.getElementById('photoFileInput').click()">
+      <svg class="camera-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+        <circle cx="12" cy="13" r="4"/>
+      </svg>
+      <p>Tap to take photo</p>
+      <p class="hint">optional — fill fields below either way</p>
+    </div>
+    <input type="file" id="photoFileInput" accept="image/*" capture="environment" onchange="handlePhoto(this)">
+
+    <div class="gap" style="height:10px"></div>
+
+    <div class="field-group">
+      <div class="field-label">Category</div>
+      <input class="field-input" id="inputCategory" type="text" maxlength="30" placeholder="e.g. Windows, Boiler, Kitchen...">
+    </div>
+    <div class="gap" style="height:8px"></div>
+    <div class="field-group">
+      <div class="field-label">Note</div>
+      <input class="field-input" id="inputNote" type="text" maxlength="120" placeholder="e.g. Replace bulb, needs cleaning...">
+    </div>
+
+    <div class="gap" style="height:8px"></div>
+    <div id="sendToast"></div>
+    <div id="sendToastSpacer" style="height:0px"></div>
+
+    <div class="btn-row">
+      <button class="btn btn-secondary" onclick="endSession()">End Session</button>
+      <button class="btn btn-primary" onclick="nextPhoto()">Next Photo →</button>
+    </div>
+
+    <!-- ── Session log ── -->
+    <div id="sessionLogWrap" style="display:none;flex-direction:column;gap:6px;margin-top:10px;flex-shrink:0;">
+      <div class="divider"></div>
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.1em;color:var(--text-muted);font-family:'DM Mono',monospace;">This Session</div>
+      <div id="sessionLog" style="display:flex;flex-direction:column;gap:6px;max-height:160px;overflow-y:auto;"></div>
+    </div>
+
+  </div>
+
+</div>
+
+<script>
+// ─── State ────────────────────────────────────────────────────────────────────
+const state = {
+  property: '',
+  name: '',
+  location: '',
+  currentPhotoFile: null,
+  sessionLog: [], // {category, note, photoUrl, localUrl}
+  _prevScreen: 'screen-session',
+};
+
+// ─── Sheets URL ───────────────────────────────────────────────────────────────
+const HARDCODED_URL = 'https://script.google.com/macros/s/AKfycbwJbp5i1wYg-9XpnRDO5HpRLEdu6D6CO6nwp8QcfTAuhJBNHFidxc0oSCED2KinyYyLQw/exec';
+
+function getSheetsUrl() {
+  try { return localStorage.getItem('sheetsWebAppUrl') || HARDCODED_URL; } catch(e) { return HARDCODED_URL; }
+}
+function setSheetsUrl(url) {
+  try { localStorage.setItem('sheetsWebAppUrl', url); } catch(e) {}
+}
+function saveSheetUrl() {
+  const url = document.getElementById('sheetsUrlInput').value.trim();
+  if (!url) { alert('Please paste a URL first.'); return; }
+  if (!url.startsWith('https://script.google.com')) {
+    alert('That doesn\'t look like a Google Apps Script URL.'); return;
+  }
+  setSheetsUrl(url);
+  updateSheetStatus(url);
+  alert('✓ URL saved!');
+}
+function updateSheetStatus(url) {
+  const dot = document.getElementById('statusDot');
+  const txt = document.getElementById('statusText');
+  if (url) {
+    dot.className = 'status-dot connected';
+    txt.textContent = 'URL saved — ready to send';
+    document.getElementById('sheetsUrlInput').value = url;
+  } else {
+    dot.className = 'status-dot';
+    txt.textContent = 'No URL saved yet';
+  }
+}
+async function testSheetConnection() {
+  const url = getSheetsUrl();
+  if (!url) { alert('No URL saved yet.'); return; }
+  const btn = event.target;
+  btn.textContent = 'Testing...';
+  btn.disabled = true;
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ action: 'submitRows', rows: [{ property: 'TEST', inspector: 'Test', category: 'Connection check', note: 'Delete this row',  photoUrl: '', date: new Date().toLocaleDateString() }] }),
+    });
+    const result = await resp.json();
+    if (result.success) {
+      document.getElementById('statusDot').className = 'status-dot connected';
+      document.getElementById('statusText').textContent = '✓ Connected — test row sent';
+      alert('✓ Works! A test row was added to your sheet.');
+    } else { throw new Error(result.error); }
+  } catch(e) {
+    document.getElementById('statusDot').className = 'status-dot error';
+    document.getElementById('statusText').textContent = '✗ Connection failed';
+    alert('Connection failed. Check the URL and that "Anyone" has access.');
+  }
+  btn.textContent = 'Test Connection';
+  btn.disabled = false;
+}
+
+// ─── Screens ──────────────────────────────────────────────────────────────────
+function showScreen(id) {
+  if (id === 'screen-settings') {
+    state._prevScreen = document.querySelector('.screen.active')?.id || 'screen-session';
+    updateSheetStatus(getSheetsUrl());
+  }
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+
+  // Update header right side
+  const hr = document.getElementById('headerRight');
+  if (id === 'screen-photo') {
+    hr.innerHTML = `<div class="session-info">${esc(state.property)}<br>${esc(state.name)}</div>`;
+  } else {
+    hr.innerHTML = `<button class="settings-btn" onclick="showScreen('screen-settings')" title="Settings">⚙</button>`;
+  }
+  window.scrollTo(0, 0);
+}
+
+function goBack() {
+  showScreen(state._prevScreen || 'screen-session');
+}
+
+function toggleOtherName(sel) {
+  sel.dataset.empty = sel.value === '' ? 'true' : 'false';
+  const other = document.getElementById('inputNameOther');
+  other.style.display = sel.value === 'Other' ? 'block' : 'none';
+  if (sel.value === 'Other') other.focus();
+}
+
+// ─── Session ──────────────────────────────────────────────────────────────────
+function startSession() {
+  const prop = document.getElementById('inputProperty').value.trim();
+  const selectedName = document.getElementById('inputName').value;
+  const name = selectedName === 'Other' ? document.getElementById('inputNameOther').value.trim() : selectedName;
+  if (!prop) { document.getElementById('inputProperty').focus(); return; }
+  if (!name) { document.getElementById('inputName').focus(); return; }
+  state.property = prop;
+  state.name = name;
+
+  // Grab location once for the whole session
+  state.location = document.getElementById('inputLocation').value.trim();
+
+  resetPhotoScreen();
+  showScreen('screen-photo');
+}
+
+async function endSession() {
+  const category = document.getElementById('inputCategory').value.trim();
+  const note     = document.getElementById('inputNote').value.trim();
+  
+  const hasData  = category || note || assign || state.currentPhotoFile;
+
+  if (hasData) {
+    const url = getSheetsUrl();
+    if (url) {
+      const today = new Date().toLocaleDateString();
+      let photoUrl = '';
+      if (state.currentPhotoFile) {
+        try {
+          const base64 = await compressImage(state.currentPhotoFile);
+          const filename = `${state.property}_${category || 'photo'}_${Date.now()}.jpg`;
+          const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain' },
+            body: JSON.stringify({ action: 'uploadPhoto', unit: state.property, category: category || 'photo', filename, mimeType: state.currentPhotoFile.type || 'image/jpeg', base64 }),
+          });
+          const result = await resp.json();
+          if (result.success) photoUrl = result.viewUrl;
+        } catch(e) {}
+      }
+      try {
+        await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: JSON.stringify({ action: 'submitRows', rows: [{ property: state.property, inspector: state.name, category, note, photoUrl, location: state.location, date: today }] }),
+        });
+      } catch(e) {}
+    }
+  }
+
+  state.property = '';
+  state.name = '';
+  state.location = '';
+  state.currentPhotoFile = null;
+  state.currentItemLocalUrl = null;
+  document.getElementById('inputProperty').value = '';
+  document.getElementById('inputName').value = '';
+  state.sessionLog = [];
+  document.getElementById('sessionLog').innerHTML = '';
+  document.getElementById('sessionLogWrap').style.display = 'none';
+  document.getElementById('inputLocation').value = '';
+  document.getElementById('inputNameOther').value = '';
+  document.getElementById('inputNameOther').style.display = 'none';
+  showScreen('screen-session');
+}
+
+// ─── Photo ────────────────────────────────────────────────────────────────────
+function handlePhoto(input) {
+  const file = input.files[0];
+  if (!file) return;
+  state.currentPhotoFile = file;
+  state.currentItemLocalUrl = URL.createObjectURL(file);
+  const url = state.currentItemLocalUrl;
+  document.getElementById('photoZone').innerHTML = `
+    <img src="${url}" alt="Photo">
+    <div class="overlay">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+    </div>`;
+}
+
+function addToSessionLog(category, note, photoUrl, localUrl) {
+  state.sessionLog.push({ category, note, photoUrl, localUrl });
+  const wrap = document.getElementById('sessionLogWrap');
+  const log = document.getElementById('sessionLog');
+  wrap.style.display = 'flex';
+
+  const row = document.createElement('div');
+  row.className = 'log-row';
+  const cat = category || '—';
+  const noteShort = note ? (note.length > 20 ? note.slice(0, 20) + '…' : note) : '—';
+  const hasPhoto = !!(photoUrl || localUrl);
+  const linkUrl = photoUrl || localUrl || '';
+  row.innerHTML = `
+    <div class="log-cat">${cat}</div>
+    <div class="log-note">${noteShort}</div>
+    <button class="log-photo-btn ${hasPhoto ? '' : 'no-photo'}" onclick="openPhoto('${linkUrl}')">
+      ${hasPhoto ? '📷 View' : 'No photo'}
+    </button>`;
+  log.appendChild(row);
+  // Scroll to bottom
+  log.scrollTop = log.scrollHeight;
+}
+
+function openPhoto(url) {
+  if (url) window.open(url, '_blank');
+}
+
+function resetPhotoScreen() {
+  state.currentPhotoFile = null;
+  document.getElementById('photoFileInput').value = '';
+  document.getElementById('photoZone').innerHTML = `
+    <svg class="camera-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+      <circle cx="12" cy="13" r="4"/>
+    </svg>
+    <p>Tap to take photo</p>
+    <p class="hint">optional — fill fields below either way</p>`;
+  document.getElementById('inputCategory').value = '';
+  document.getElementById('inputNote').value = '';
+  
+  hideSendToast();
+}
+
+// ─── Next Photo ───────────────────────────────────────────────────────────────
+async function nextPhoto() {
+  const category = document.getElementById('inputCategory').value.trim();
+  const note     = document.getElementById('inputNote').value.trim();
+  
+
+  if (!category && !note && !state.currentPhotoFile) {
+    alert('Add at least a photo or fill in one field before continuing.');
+    return;
+  }
+
+  const url = getSheetsUrl();
+  if (!url) {
+    showSendToast('failed', '⚠ No Sheets URL — go to Settings');
+    return;
+  }
+
+  showSendToast('sending', 'Saving...');
+
+  const today = new Date().toLocaleDateString();
+  const location = state.location;
+  let photoUrl = '';
+
+  // Upload photo first, then submit row with link
+  if (state.currentPhotoFile) {
+    try {
+      const base64 = await compressImage(state.currentPhotoFile);
+      const filename = `${state.property}_${category || 'photo'}_${Date.now()}.jpg`;
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({
+          action: 'uploadPhoto',
+          unit: state.property,
+          category: category || 'photo',
+          filename: filename,
+          mimeType: state.currentPhotoFile.type || 'image/jpeg',
+          base64: base64,
+        }),
+      });
+      const result = await resp.json();
+      if (result.success) photoUrl = result.viewUrl;
+    } catch(e) { /* photo upload failed, continue without */ }
+  }
+
+  // Submit row with photo link
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({
+        action: 'submitRows',
+        rows: [{
+          property: state.property,
+          inspector: state.name,
+          category: category,
+          note: note,
+          photoUrl: photoUrl,
+          location: location,
+          date: today,
+        }],
+      }),
+    });
+    const result = await resp.json();
+    if (!result.success) throw new Error(result.error);
+    showSendToast('sent', '✓ Saved' + (photoUrl ? ' + photo' : ''));
+    addToSessionLog(category, note, state.currentItemLocalUrl || '', state.currentItemLocalUrl || '');
+    setTimeout(() => resetPhotoScreen(), 800);
+  } catch(e) {
+    showSendToast('failed', '✗ Failed to save — check connection');
+  }
+}
+
+function showSendToast(type, msg) {
+  const toast = document.getElementById('sendToast');
+  const spacer = document.getElementById('sendToastSpacer');
+  const spinner = type === 'sending' ? '<div class="spinner"></div>' : '';
+  toast.className = `send-toast ${type}`;
+  toast.innerHTML = `${spinner}${msg}`;
+  spacer.style.height = '8px';
+}
+
+function hideSendToast() {
+  const toast = document.getElementById('sendToast');
+  const spacer = document.getElementById('sendToastSpacer');
+  toast.className = '';
+  toast.innerHTML = '';
+  spacer.style.height = '0px';
+}
+
+function fillLocation() {
+  const btn = document.getElementById('geoBtn');
+  btn.style.borderColor = '#111';
+  btn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-color:#aaa;border-top-color:#111;"></div>';
+  getLocation().then(loc => {
+    document.getElementById('inputLocation').value = loc || '';
+    btn.style.borderColor = loc ? '#2e7d32' : '#d32f2f';
+    btn.innerHTML = loc
+      ? '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#2e7d32" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+      : '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#d32f2f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>';
+  });
+}
+
+// ─── Location ─────────────────────────────────────────────────────────────────
+function getLocation() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) { resolve(''); return; }
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const { latitude: lat, longitude: lon } = pos.coords;
+          const resp = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`,
+            { headers: { 'Accept-Language': 'en' } }
+          );
+          const data = await resp.json();
+          // Build a clean address: street number + street + city + state
+          const a = data.address || {};
+          const parts = [
+            (a.house_number ? a.house_number + ' ' : '') + (a.road || ''),
+            a.city || a.town || a.village || '',
+            a.state || '',
+          ].filter(Boolean);
+          resolve(parts.join(', '));
+        } catch(e) {
+          resolve('');
+        }
+      },
+      () => resolve(''), // user denied or timed out — silently continue
+      { timeout: 6000, maximumAge: 30000 }
+    );
+  });
+}
+
+// ─── Utility ──────────────────────────────────────────────────────────────────
+function fileToBase64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(',')[1]);
+    r.onerror = () => rej(new Error('Read failed'));
+    r.readAsDataURL(file);
+  });
+}
+
+// Compress image before upload: resizes to max 1200px, quality 0.7
+// Reduces typical phone photo from ~4MB to ~150-250KB
+function compressImage(file, maxPx = 1200, quality = 0.7) {
+  return new Promise((res) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        res(dataUrl.split(',')[1]); // return base64 only
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function esc(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Init — baked-in default URL (used if nothing saved in localStorage)
+updateSheetStatus(getSheetsUrl());
+</script>
+</body>
+</html>
