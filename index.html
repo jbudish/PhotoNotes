@@ -363,6 +363,11 @@
     </div>
     <div class="gap" style="height:12px"></div>
     <div class="field-group">
+      <div class="field-label">Unit #</div>
+      <input class="field-input" id="inputUnit" type="text" maxlength="30" placeholder="e.g. 101, 2B...">
+    </div>
+    <div class="gap" style="height:12px"></div>
+    <div class="field-group">
       <div class="field-label">Location</div>
       <div style="display:flex;gap:8px;align-items:stretch;">
         <button id="geoBtn" onclick="fillLocation()" style="flex-shrink:0;width:46px;height:46px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:border-color 0.15s;" title="Use my location">
@@ -443,6 +448,7 @@
 // ─── State ────────────────────────────────────────────────────────────────────
 const state = {
   property: '',
+  unit: '',
   name: '',
   location: '',
   currentPhotoFile: null,
@@ -520,7 +526,8 @@ function showScreen(id) {
   // Update header right side
   const hr = document.getElementById('headerRight');
   if (id === 'screen-photo') {
-    hr.innerHTML = `<div class="session-info">${esc(state.property)}<br>${esc(state.name)}</div>`;
+    const unitLine = state.unit ? `<br>${esc(state.unit)}` : '';
+    hr.innerHTML = `<div class="session-info">${esc(state.property)}${unitLine}<br>${esc(state.name)}</div>`;
   } else {
     hr.innerHTML = `<button class="settings-btn" onclick="showScreen('screen-settings')" title="Settings">⚙</button>`;
   }
@@ -573,7 +580,7 @@ async function endSession() {
           const resp = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'text/plain' },
-            body: JSON.stringify({ action: 'uploadPhoto', unit: state.property, category: category || 'photo', filename, mimeType: state.currentPhotoFile.type || 'image/jpeg', base64 }),
+            body: JSON.stringify({ action: 'uploadPhoto', unit: state.property, subunit: state.unit, category: category || 'photo', filename, mimeType: state.currentPhotoFile.type || 'image/jpeg', base64 }),
           });
           const result = await resp.json();
           if (result.success) photoUrl = result.viewUrl;
@@ -583,7 +590,7 @@ async function endSession() {
         await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'text/plain' },
-          body: JSON.stringify({ action: 'submitRows', rows: [{ property: state.property, inspector: state.name, category, note, photoUrl, location: state.location, date: today }] }),
+          body: JSON.stringify({ action: 'submitRows', rows: [{ property: state.property, unit: state.unit, inspector: state.name, category, note, photoUrl, location: state.location, date: today }] }),
         });
       } catch(e) {}
     }
@@ -596,6 +603,7 @@ async function endSession() {
   state.currentItemLocalUrl = null;
   document.getElementById('inputProperty').value = '';
   document.getElementById('inputName').value = '';
+  document.getElementById('inputUnit').value = '';
   state.sessionLog = [];
   document.getElementById('sessionLog').innerHTML = '';
   document.getElementById('sessionLogWrap').style.display = 'none';
@@ -696,6 +704,7 @@ async function nextPhoto() {
         body: JSON.stringify({
           action: 'uploadPhoto',
           unit: state.property,
+          subunit: state.unit,
           category: category || 'photo',
           filename: filename,
           mimeType: state.currentPhotoFile.type || 'image/jpeg',
@@ -716,6 +725,7 @@ async function nextPhoto() {
         action: 'submitRows',
         rows: [{
           property: state.property,
+          unit: state.unit,
           inspector: state.name,
           category: category,
           note: note,
