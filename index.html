@@ -483,7 +483,7 @@
         <p>Tap to take photo</p>
         <p class="hint">optional — fill fields below either way</p>
       </div>
-      <button onclick="openFollowUp()" style="position:absolute;top:8px;right:8px;background:#fff;border:1px solid #ddd;border-radius:8px;cursor:pointer;padding:7px 10px;font-family:'DM Mono',monospace;font-size:10px;color:#555;letter-spacing:0.05em;box-shadow:0 6px 18px rgba(0,0,0,0.2),0 2px 6px rgba(0,0,0,0.1);z-index:10;transition:box-shadow 0.15s;line-height:1.3;text-align:center;" onmouseover="this.style.boxShadow='0 8px 24px rgba(0,0,0,0.25),0 3px 8px rgba(0,0,0,0.12)'" onmouseout="this.style.boxShadow='0 6px 18px rgba(0,0,0,0.2),0 2px 6px rgba(0,0,0,0.1)'">Follow up<br>questions</button>
+      <button onclick="openFollowUp()" style="position:absolute;top:8px;right:8px;width:62px;height:62px;background:#fff;border:1px solid #ddd;border-radius:10px;cursor:pointer;padding:0;font-family:'DM Mono',monospace;font-size:9px;color:#555;letter-spacing:0.04em;box-shadow:0 6px 18px rgba(0,0,0,0.2),0 2px 6px rgba(0,0,0,0.1);z-index:10;transition:box-shadow 0.15s;line-height:1.4;text-align:center;display:flex;align-items:center;justify-content:center;" onmouseover="this.style.boxShadow='0 8px 24px rgba(0,0,0,0.25),0 3px 8px rgba(0,0,0,0.12)'" onmouseout="this.style.boxShadow='0 6px 18px rgba(0,0,0,0.2),0 2px 6px rgba(0,0,0,0.1)'">Follow up<br>questions</button>
     </div>
     <input type="file" id="photoFileInput" accept="image/*" capture="environment" onchange="handlePhoto(this)">
 
@@ -516,6 +516,26 @@
       <div id="sessionLog" style="display:flex;flex-direction:column;gap:6px;max-height:160px;overflow-y:auto;"></div>
     </div>
 
+  </div>
+
+  <!-- ── Follow Up modal ── -->
+  <div id="followUpModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.25);z-index:400;align-items:flex-end;justify-content:center;">
+    <div style="background:#fff;border-radius:20px 20px 0 0;padding:22px 20px 34px;width:100%;max-width:480px;display:flex;flex-direction:column;gap:12px;box-shadow:0 -4px 24px rgba(0,0,0,.1);animation:slideUp 0.2s ease;" onclick="event.stopPropagation()">
+      <div style="font-size:16px;font-weight:700;color:#111;">Follow Up Question</div>
+      <div class="field-group">
+        <div class="field-label">Category</div>
+        <input class="field-input" id="fuCategory" type="text" maxlength="60" placeholder="e.g. Plumbing, Electric...">
+      </div>
+      <div class="field-group">
+        <div class="field-label">Question</div>
+        <input class="field-input" id="fuQuestion" type="text" maxlength="200" placeholder="e.g. Is the permit current?">
+      </div>
+      <div id="fuToast"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <button class="btn btn-secondary" onclick="closeFollowUp()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitFollowUp()">Submit</button>
+      </div>
+    </div>
   </div>
 
 </div>
