@@ -94,6 +94,7 @@
   }
   .screen.active { display: flex; }
 
+  @keyframes slideUp { from { transform: translateY(40px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
   @keyframes fadeIn {
     from { opacity: 0; transform: translateY(6px); }
     to { opacity: 1; transform: translateY(0); }
@@ -473,13 +474,18 @@
   <!-- ── SCREEN 2: Photo + Details ── -->
   <div class="screen" id="screen-photo">
 
-    <div class="photo-zone" id="photoZone" onclick="document.getElementById('photoFileInput').click()">
-      <svg class="camera-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-        <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-        <circle cx="12" cy="13" r="4"/>
-      </svg>
-      <p>Tap to take photo</p>
-      <p class="hint">optional — fill fields below either way</p>
+    <div style="position:relative;flex-shrink:0;">
+      <div class="photo-zone" id="photoZone" onclick="document.getElementById('photoFileInput').click()">
+        <svg class="camera-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+          <circle cx="12" cy="13" r="4"/>
+        </svg>
+        <p>Tap to take photo</p>
+        <p class="hint">optional — fill fields below either way</p>
+      </div>
+      <button onclick="openFollowUp()" title="Follow Up Question" style="position:absolute;top:8px;right:8px;width:36px;height:36px;background:rgba(255,255,255,0.92);border:1px solid #ccc;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;box-shadow:0 1px 4px rgba(0,0,0,0.12);z-index:10;transition:border-color 0.15s;" onmouseover="this.style.borderColor='#111'" onmouseout="this.style.borderColor='#ccc'">
+        ❓
+      </button>
     </div>
     <input type="file" id="photoFileInput" accept="image/*" capture="environment" onchange="handlePhoto(this)">
 
@@ -499,12 +505,10 @@
     <div id="sendToast"></div>
     <div id="sendToastSpacer" style="height:0px"></div>
 
-    <div style="display:flex;flex-direction:column;gap:8px;flex-shrink:0;">
-      <button class="btn btn-primary" onclick="nextPhoto()">Next Photo →</button>
-      <div class="btn-row">
-        <button class="btn btn-secondary" onclick="newUnit()">New Unit</button>
-        <button class="btn btn-secondary" onclick="endSession()">End Session</button>
-      </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;flex-shrink:0;">
+      <button class="btn btn-secondary" style="font-size:13px;padding:12px 6px;" onclick="endSession()">End Session</button>
+      <button class="btn btn-secondary" style="font-size:13px;padding:12px 6px;" onclick="newUnit()">New Unit</button>
+      <button class="btn btn-primary" style="font-size:13px;padding:12px 6px;" onclick="nextPhoto()">Next Photo →</button>
     </div>
 
     <!-- ── Session log ── -->
@@ -926,6 +930,82 @@ function fillLocation() {
   });
 }
 
+
+// ─── Dropdowns ────────────────────────────────────────────────────────────────
+async function loadDropdowns() {
+  const url = getSheetsUrl();
+  if (!url) return;
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ action: 'getDropdowns' }),
+    });
+    const result = await resp.json();
+    if (result.success && result.categories.length) {
+      populateCategoryDropdown(result.categories);
+    }
+  } catch(e) {
+    // Silent fail — dropdown stays as-is
+  }
+}
+
+function populateCategoryDropdown(categories) {
+  const sel = document.getElementById('inputCategory');
+  sel.innerHTML = '<option value="">Select category...</option>'
+    + categories.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  sel.dataset.empty = 'true';
+}
+
+
+// ─── Follow Up ────────────────────────────────────────────────────────────────
+function openFollowUp() {
+  document.getElementById('fuCategory').value = document.getElementById('inputCategory').value || '';
+  document.getElementById('fuQuestion').value = '';
+  document.getElementById('fuToast').innerHTML = '';
+  document.getElementById('followUpModal').style.display = 'flex';
+}
+
+function closeFollowUp() {
+  document.getElementById('followUpModal').style.display = 'none';
+}
+
+async function submitFollowUp() {
+  const category = document.getElementById('fuCategory').value.trim();
+  const question = document.getElementById('fuQuestion').value.trim();
+  if (!category || !question) {
+    document.getElementById('fuToast').innerHTML = '<div style="font-size:13px;color:#c62828;">Both fields are required.</div>';
+    return;
+  }
+  const url = getSheetsUrl();
+  if (!url) {
+    document.getElementById('fuToast').innerHTML = '<div style="font-size:13px;color:#c62828;">No Sheets URL configured.</div>';
+    return;
+  }
+  document.getElementById('fuToast').innerHTML = '<div style="font-size:13px;color:#888;">Saving...</div>';
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({
+        action: 'submitFollowUp',
+        row: {
+          property: state.property,
+          location: state.location,
+          category: category,
+          question: question,
+          date: new Date().toLocaleDateString(),
+        }
+      }),
+    });
+    const result = await resp.json();
+    if (!result.success) throw new Error(result.error);
+    closeFollowUp();
+  } catch(e) {
+    document.getElementById('fuToast').innerHTML = '<div style="font-size:13px;color:#c62828;">Failed to save. Try again.</div>';
+  }
+}
+
 // ─── Location ─────────────────────────────────────────────────────────────────
 function getLocation() {
   return new Promise((resolve) => {
@@ -999,6 +1079,7 @@ function esc(str) {
 auth.load();
 if (auth.name) {
   // Already signed in — go straight to session screen
+  loadDropdowns();
   showScreen('screen-session');
   document.getElementById('inputProperty').value = '';
   document.getElementById('inputUnit').value = '';
