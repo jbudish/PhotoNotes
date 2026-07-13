@@ -998,27 +998,22 @@ async function submitFollowUp() {
     return;
   }
   document.getElementById('fuToast').innerHTML = '<div style="font-size:13px;color:#888;">Saving...</div>';
-  try {
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: JSON.stringify({
-        action: 'submitFollowUp',
-        row: {
-          property: state.property,
-          location: state.location,
-          category: category,
-          question: question,
-          date: new Date().toLocaleDateString(),
-        }
-      }),
-    });
-    const result = await resp.json();
-    if (!result.success) throw new Error(result.error);
-    closeFollowUp();
-  } catch(e) {
-    document.getElementById('fuToast').innerHTML = '<div style="font-size:13px;color:#c62828;">Failed to save. Try again.</div>';
-  }
+  // Fire and close — script completes server-side even if response can't be read cross-origin
+  fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify({
+      action: 'submitFollowUp',
+      row: {
+        property: state.property,
+        location: state.location,
+        category: category,
+        question: question,
+        date: new Date().toLocaleDateString(),
+      }
+    }),
+  }).catch(() => {});
+  setTimeout(() => closeFollowUp(), 400);
 }
 
 // ─── Location ─────────────────────────────────────────────────────────────────
