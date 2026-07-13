@@ -774,15 +774,12 @@ async function endSession() {
   state.currentPhotoFile = null;
   state.currentItemLocalUrl = null;
   document.getElementById('inputProperty').value = '';
-  document.getElementById('inputName').value = '';
   document.getElementById('inputUnit').value = '';
   document.getElementById('inputProperty').value = '';
   state.sessionLog = [];
   document.getElementById('sessionLog').innerHTML = '';
   document.getElementById('sessionLogWrap').style.display = 'none';
   document.getElementById('inputLocation').value = '';
-  document.getElementById('inputNameOther').value = '';
-  document.getElementById('inputNameOther').style.display = 'none';
   showScreen('screen-session');
 }
 
