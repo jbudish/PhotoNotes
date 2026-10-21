@@ -13,7 +13,7 @@ The Apps Script source is `google-apps-script.js`. It is pasted into the Sheet; 
    - Follow-ups: `FollowUp`.
    - Categories: `Categories`, or unique values from the rows tab.
    - Row headers: Property, Unit, Location, User, Category, Notes, Photo link, Date, Time. User, Notes, and Photo link map to inspector, note, and photoUrl. The script fills Time when it saves the row.
-   - Drive: new photos are files directly in the `PhotoNotes` folder (looked up by that name). The file name is `Property_Unit_Category_0000001.jpg`. No property, unit, or category folders.
+   - Drive: new photos are files directly in folder id `1ejeYoPismA9hAEC6G7V11CqvAGhPHyu-` (`CONFIG.PHOTO_NOTES_FOLDER_ID`; Script Property `photoNotesFolderId` overrides it). The name `PhotoNotes` is used only if that id cannot be opened. The file name is `Property_Unit_Category_0000001.jpg`. No property, unit, or category folders. The first time `photoNotesCounter` is unset, it starts at the highest `*_#######.jpg` number already in that folder.
 4. **Deploy → Manage deployments → Edit** (pencil) on the existing deployment → **Version: New version** → Deploy. That keeps the web app URL. A new deployment would change it.
 
 The phone keeps posting to the existing `/exec` URL. If a deployment answers `Unknown action` for `submitPhotoRow`, the queue falls back to `uploadPhoto` then `submitRows` and keeps retrying.

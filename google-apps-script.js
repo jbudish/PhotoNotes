@@ -72,10 +72,14 @@ var CONFIG = {
   // Hidden tab of client ids so a retry does not create a second file or row.
   IDS_SHEET_NAME: 'ProcessedIds',
 
-  // New photos are files directly in this Drive folder. No property or unit
-  // subfolders. Set to '' to save files in My Drive instead.
-  // If your current photos live in a differently named folder, change this
-  // BEFORE deploying or new photos will split into a second tree.
+  // Captured photos are files directly in this Drive folder (no subfolders).
+  // Script Property photoNotesFolderId overrides this id. By-name lookup is
+  // only the fallback when getFolderById fails.
+  PHOTO_NOTES_FOLDER_ID: '1ejeYoPismA9hAEC6G7V11CqvAGhPHyu-',
+
+  // Used only when PHOTO_NOTES_FOLDER_ID cannot be opened. Set to '' to
+  // save files in My Drive in that case. More than one folder may share
+  // this name, so it is not the primary destination.
   DRIVE_ROOT_FOLDER_NAME: 'PhotoNotes',
 
   // Row columns, in the same order the phone's submitRows object is built.
@@ -538,7 +542,7 @@ function tagRowId_(sheet, clientId) {
 // ─── Drive ───────────────────────────────────────────────────────────────────
 
 /**
- * One file in <DRIVE_ROOT_FOLDER_NAME>, no subfolders:
+ * One file in the PhotoNotes folder (PHOTO_NOTES_FOLDER_ID), no subfolders:
  *   Property_Unit_Category_0000001.jpg
  * uploadPhoto calls the property `unit` and the unit number `subunit`,
  * because that is what the phone has always sent.
@@ -578,7 +582,23 @@ function photoResult_(fileId, viewUrl, alreadySaved) {
   };
 }
 
+function photoNotesFolderId_() {
+  var override = '';
+  try {
+    override = PropertiesService.getScriptProperties().getProperty('photoNotesFolderId') || '';
+  } catch (err) {}
+  override = String(override).trim();
+  return override || CONFIG.PHOTO_NOTES_FOLDER_ID;
+}
+
 function getRootFolder_() {
+  var id = photoNotesFolderId_();
+  if (id) {
+    try {
+      var byId = DriveApp.getFolderById(id);
+      if (byId && !byId.isTrashed()) return byId;
+    } catch (err) {}
+  }
   var name = CONFIG.DRIVE_ROOT_FOLDER_NAME;
   if (!name) return DriveApp.getRootFolder();
   var found = DriveApp.getFoldersByName(name);
@@ -588,11 +608,34 @@ function getRootFolder_() {
 
 function nextPhotoNumber_() {
   var props = PropertiesService.getScriptProperties();
-  var current = parseInt(props.getProperty('photoNotesCounter') || '0', 10);
-  if (!current || current < 0) current = 0;
+  var stored = props.getProperty('photoNotesCounter');
+  var current;
+  if (stored == null || String(stored).trim() === '') {
+    current = highestPhotoNumberInFolder_(getRootFolder_());
+  } else {
+    current = parseInt(stored, 10);
+    if (!current || current < 0) current = 0;
+  }
   var next = current + 1;
   props.setProperty('photoNotesCounter', String(next));
   return next;
+}
+
+// Highest ####### already used by a file named *_#######.jpg in this folder.
+// Direct children only. An unset counter is seeded from this so a rename of
+// existing files does not collide with the next upload.
+function highestPhotoNumberInFolder_(folder) {
+  var highest = 0;
+  if (!folder) return highest;
+  var files = folder.getFiles();
+  while (files.hasNext()) {
+    var name = String(files.next().getName() || '');
+    var match = name.match(/_(\d{7})\.jpg$/i);
+    if (!match) continue;
+    var n = parseInt(match[1], 10);
+    if (n > highest) highest = n;
+  }
+  return highest;
 }
 
 function padPhotoNumber_(value) {
