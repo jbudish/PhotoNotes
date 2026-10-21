@@ -185,6 +185,8 @@
   .btn-secondary:hover { background: #f5f5f5; }
   .btn-secondary:active { transform: scale(0.98); }
   .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  .match-choice { justify-content: flex-start; text-align: left; min-height: 48px; height: auto; padding: 10px 12px; flex-direction: column; align-items: flex-start; gap: 2px; }
+  .match-choice small { font-weight: 400; color: var(--text-muted); font-size: 12px; }
 
   .btn-row {
     display: grid;
@@ -338,21 +340,32 @@
   .grouped-select:focus { border-color: #111; }
   .grouped-select option { background: #fff; font-size: 14px; color: #111; }
   .grouped-select optgroup { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: #aaa; font-style: normal; }
-  /* Avatar button + dropdown */
-  .avatar-wrap { position: relative; display: inline-block; }
-  .avatar-btn {
-    background: #fff;
-    border: 1px solid var(--border);
-    border-radius: 50%;
-    width: 34px; height: 34px;
-    display: flex; align-items: center; justify-content: center;
-    cursor: pointer; padding: 0; flex-shrink: 0;
+  /* Signed-in name. Tapping it opens the same menu as the old avatar. */
+  .avatar-wrap { position: relative; display: inline-block; max-width: 96px; }
+  .user-name-btn {
+    background: none;
+    border: none;
+    border-radius: 8px;
+    margin: 0;
+    padding: 6px 2px 6px 8px;
+    min-height: 34px;
+    max-width: 96px;
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.2;
+    color: #111111;
   }
-  .avatar-btn:hover { border-color: #111; }
+  .user-name-btn:hover { background: var(--surface); }
   .user-menu {
     display: none;
     position: absolute;
-    right: 0; top: 42px;
+    right: 0; top: calc(100% + 6px);
     background: #fff;
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -560,6 +573,18 @@
     </div>
   </div>
 
+  <div id="matchSheet" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.25);z-index:450;align-items:flex-end;justify-content:center;">
+    <div style="background:#fff;border-radius:20px 20px 0 0;padding:18px 16px 22px;width:100%;max-width:480px;max-height:92%;display:flex;flex-direction:column;gap:10px;box-shadow:0 -4px 24px rgba(0,0,0,.1);" onclick="event.stopPropagation()">
+      <div style="font-size:18px;font-weight:700;">Did you mean…?</div>
+      <div id="matchSubtitle" style="font-size:13px;color:#555;"></div>
+      <div id="matchCandidates" style="display:flex;flex-direction:column;gap:8px;overflow:auto;max-height:28vh;"></div>
+      <input class="field-input" id="matchSearch" type="search" placeholder="Search all properties" autocomplete="off" enterkeyhint="search" style="font-size:16px;">
+      <div id="matchSearchStatus" style="font-size:12px;color:#888;min-height:0;"></div>
+      <div id="matchResults" style="display:flex;flex-direction:column;gap:8px;overflow:auto;min-height:0;"></div>
+      <button class="btn btn-secondary" id="matchKeep" type="button" onclick="keepMatchInPhotoNotes()">New property / keep in PhotoNotes</button>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -571,6 +596,7 @@ const state = {
   currentPhotoFile: null,
   currentItemLocalUrl: null,
   sessionLog: [],
+  sessionPhotoIds: [],
   _prevScreen: 'screen-session',
 };
 
@@ -600,9 +626,7 @@ const auth = {
     }
     hr.innerHTML = `
       <div class="avatar-wrap">
-        <button class="avatar-btn" onclick="event.stopPropagation();toggleUserMenu()" title="${esc(this.name)}">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="8" r="4" fill="#555"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" stroke="#555" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg>
-        </button>
+        <button type="button" class="user-name-btn" onclick="event.stopPropagation();toggleUserMenu()">${esc(this.name)}</button>
         <div class="user-menu" id="userMenu">
           <div class="user-menu-name">${esc(this.name)}</div>
           <button class="user-menu-btn" onclick="showScreen('screen-settings')">⚙ Settings</button>
@@ -724,11 +748,50 @@ function goBack() {
 }
 
 // ─── Session ──────────────────────────────────────────────────────────────────
+function readStoredJson(key) {
+  try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (err) { return null; }
+}
+
+function writeStoredJson(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (err) {}
+}
+
+function samePropertyName(a, b) {
+  return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+}
+
+function persistOpenSession() {
+  writeStoredJson('pnOpenSession', {
+    property: state.property,
+    location: state.location,
+    inspector: auth.name,
+    ids: state.sessionPhotoIds.slice(),
+  });
+}
+
+function rememberSessionPhoto(id) {
+  if (!id || state.sessionPhotoIds.indexOf(id) !== -1) return;
+  state.sessionPhotoIds.push(id);
+  persistOpenSession();
+}
+
 function startSession() {
   const prop = document.getElementById('inputProperty').value.trim();
   if (!prop) { document.getElementById('inputProperty').focus(); return; }
+  const open = readStoredJson('pnOpenSession');
+  if (open && Array.isArray(open.ids) && open.ids.length && !samePropertyName(open.property, prop)) {
+    const stash = readStoredJson('pnUnfiledSessions') || [];
+    stash.push(open);
+    writeStoredJson('pnUnfiledSessions', stash);
+    state.sessionPhotoIds = [];
+  } else if (open && Array.isArray(open.ids) && samePropertyName(open.property, prop)) {
+    state.sessionPhotoIds = open.ids.slice();
+  } else {
+    state.sessionPhotoIds = [];
+  }
   state.property = prop;
   state.location = document.getElementById('inputLocation').value.trim();
+  persistOpenSession();
   document.getElementById('inputUnit').value = '';
   showScreen('screen-unit');
 }
@@ -740,22 +803,61 @@ function startUnit() {
   showScreen('screen-photo');
 }
 
+function readPendingEntry() {
+  const category = document.getElementById('inputCategory').value.trim();
+  const note = document.getElementById('inputNote').value.trim();
+  return {
+    category: category,
+    note: note,
+    // Same rule as Next Photo: category, note, or a photo is an entry.
+    hasPending: !!(category || note || state.currentPhotoFile),
+  };
+}
+
+// Queues the open entry with the Next Photo path (resize, client id, IndexedDB
+// retry). Caller must hold `capturing`. Returns 'empty', 'saved', or 'failed'.
+// On failure the form is left as-is so the entry is not discarded.
+async function submitCurrentEntry() {
+  const pending = readPendingEntry();
+  if (!pending.hasPending) return 'empty';
+
+  const url = getSheetsUrl();
+  if (!url) {
+    showSendToast('failed', '⚠ No Sheets URL — go to Settings');
+    return 'failed';
+  }
+
+  showSendToast('sending', 'Saving on this phone...');
+  let localUrl;
+  try {
+    localUrl = await captureCurrentItem(pending.category, pending.note);
+  } catch (err) {
+    showSendToast('failed', '✗ Could not save on this phone — try again');
+    return 'failed';
+  }
+
+  // The queue owns the entry now. Clear the fields before any other UI work
+  // so a second tap cannot enqueue this same note or photo again.
+  document.getElementById('inputCategory').value = '';
+  document.getElementById('inputNote').value = '';
+  try { addToSessionLog(pending.category, pending.note, '', localUrl); } catch (err) {}
+  resetPhotoScreen();
+  showSendToast('sent', '✓ Saved on this phone');
+  scheduleHideToast(1600);
+  return 'saved';
+}
+
 async function newUnit() {
   if (capturing) return;
-  const category = document.getElementById('inputCategory').value.trim();
-  const note     = document.getElementById('inputNote').value.trim();
-  const hasData  = category || note || state.currentPhotoFile;
-  if (hasData) {
-    capturing = true;
-    try {
-      await captureCurrentItem(category, note);
-    } catch (err) {
-      alert('Could not save the current photo on this phone. It was not discarded.');
-      return;
-    } finally {
-      capturing = false;
-    }
+  capturing = true;
+  let proceed = false;
+  try {
+    const result = await submitCurrentEntry();
+    proceed = result === 'empty' || result === 'saved';
+  } finally {
+    capturing = false;
   }
+  if (!proceed) return;
   state.unit = '';
   document.getElementById('inputUnit').value = '';
   state.sessionLog = [];
@@ -766,30 +868,31 @@ async function newUnit() {
 
 async function endSession() {
   if (capturing) return;
-  const category = document.getElementById('inputCategory').value.trim();
-  const note     = document.getElementById('inputNote').value.trim();
-  const hasData  = category || note || state.currentPhotoFile;
-
   capturing = true;
+  let proceed = false;
   try {
-    // The current form is queued first. End Session never deletes the queue.
-    if (hasData) {
-      try {
-        showSendToast('sending', 'Saving on this phone...');
-        await captureCurrentItem(category, note);
-      } catch (err) {
-        showSendToast('failed', '✗ Could not save on this phone — stay on this page');
-        alert('Could not save the current photo on this phone. Stay here and try End Session again so it is not lost.');
-        return;
+    // Queue the open entry first. End Session never deletes the queue.
+    const result = await submitCurrentEntry();
+    proceed = result === 'empty' || result === 'saved';
+    if (!proceed) return;
+    const sessions = sessionsToFile();
+    if (!sessions.length) {
+      alert('No photos in this session.');
+    } else {
+      showSendToast('sending', 'Filing session...');
+      for (let i = 0; i < sessions.length; i++) {
+        await fileSessionChoice(sessions[i]);
       }
+      clearFiledSessions(sessions);
     }
-    const left = await countQueueItems();
-    if (left > 0) {
-      alert(left + (left === 1 ? ' item is' : ' items are') + ' still saved on this phone and waiting to upload. They will not be discarded. Reopen PhotoNotes when you have a signal, and do not clear this site’s data.');
-    }
+  } catch (err) {
+    showSendToast('failed', '✗ Could not save on this phone — try again');
+    proceed = false;
+    return;
   } finally {
     capturing = false;
   }
+  if (!proceed) return;
 
   state.property = '';
   state.location = '';
@@ -803,6 +906,312 @@ async function endSession() {
   document.getElementById('sessionLogWrap').style.display = 'none';
   document.getElementById('inputLocation').value = '';
   showScreen('screen-session');
+}
+
+function sessionsToFile() {
+  const sessions = [];
+  const stash = readStoredJson('pnUnfiledSessions') || [];
+  for (let i = 0; i < stash.length; i++) {
+    if (stash[i] && Array.isArray(stash[i].ids) && stash[i].ids.length) sessions.push(stash[i]);
+  }
+  if (state.sessionPhotoIds.length) {
+    sessions.push({
+      property: state.property,
+      location: state.location,
+      inspector: auth.name,
+      ids: state.sessionPhotoIds.slice(),
+    });
+  }
+  return sessions;
+}
+
+function clearFiledSessions(sessions) {
+  const filed = {};
+  sessions.forEach(function (session) {
+    (session.ids || []).forEach(function (id) { filed[id] = true; });
+  });
+  state.sessionPhotoIds = state.sessionPhotoIds.filter(function (id) { return !filed[id]; });
+  try { localStorage.removeItem('pnOpenSession'); } catch (err) {}
+  try { localStorage.removeItem('pnUnfiledSessions'); } catch (err) {}
+}
+
+async function enqueueEndSession(session) {
+  const items = await getAllItems();
+  let latestPhoto = 0;
+  items.forEach(function (item) {
+    if (item.kind === 'photoRow' && session.ids.indexOf(item.id) !== -1) {
+      latestPhoto = Math.max(latestPhoto, item.createdAt || 0);
+    }
+  });
+  // After this session's photos, but not behind some other property's upload
+  // when those photos are already done.
+  let createdAt = latestPhoto ? latestPhoto + 1 : Date.now();
+  if (!latestPhoto && items.length) {
+    let min = items[0].createdAt || Date.now();
+    items.forEach(function (item) { if ((item.createdAt || 0) < min) min = item.createdAt; });
+    createdAt = min - 1;
+  }
+  return enqueueItem({
+    id: newClientId(),
+    kind: 'endSession',
+    blob: null,
+    filename: '',
+    row: {
+      property: session.property || '',
+      location: session.location || '',
+      inspector: session.inspector || auth.name,
+      ids: session.ids.slice(),
+      workbookId: session.workbookId || '',
+      folderId: session.folderId || '',
+    },
+    createdAt: createdAt,
+    seq: ++enqueueSeq,
+    attempts: 0,
+    nextAttemptAt: 0,
+    lastError: '',
+    uploadedViewUrl: '',
+  });
+}
+
+function waitForEndSession(id, ms) {
+  const start = Date.now();
+  return new Promise(function (resolve) {
+    (function poll() {
+      if (endSessionResults[id]) return resolve(endSessionResults[id]);
+      getAllItems().then(function (items) {
+        const still = items.some(function (item) { return item.id === id; });
+        if (!still) return resolve(endSessionResults[id] || null);
+        if (Date.now() - start >= ms) return resolve(endSessionResults[id] || null);
+        setTimeout(poll, 300);
+      }, function () {
+        if (Date.now() - start >= ms) resolve(null);
+        else setTimeout(poll, 300);
+      });
+    })();
+  });
+}
+
+function offlineFilingMessage() {
+  return 'You\'re offline. This session is saved on this phone and will be filed when you have a signal. Do not clear this site\'s data.';
+}
+
+function stillFilingMessage() {
+  return 'Still uploading. This session will be filed when the photos finish, and a message will appear then. Do not clear this site\'s data.';
+}
+
+async function fileSessionChoice(session) {
+  const queued = await enqueueEndSession(session);
+  if (!navigator.onLine) {
+    alert(offlineFilingMessage());
+    return;
+  }
+  endSessionWaiters[queued.id] = true;
+  let filed = null;
+  try {
+    filed = await waitForEndSession(queued.id, 90000);
+  } finally {
+    delete endSessionWaiters[queued.id];
+  }
+  if (!filed) {
+    alert(stillFilingMessage());
+    return;
+  }
+  if (!filed.needsChoice) {
+    if (filed.message) alert(filed.message);
+    return;
+  }
+  const choice = await showMatchChooser(session, filed);
+  if (!choice) {
+    clearPendingChoice();
+    alert(filed.message || 'Photos left in PhotoNotes');
+    return;
+  }
+  const confirm = {
+    property: session.property,
+    location: session.location,
+    inspector: session.inspector,
+    ids: (session.ids || []).slice(),
+    workbookId: choice.workbookId,
+    folderId: choice.folderId || '',
+  };
+  const again = await enqueueEndSession(confirm);
+  clearPendingChoice();
+  if (!navigator.onLine) {
+    alert(offlineFilingMessage());
+    return;
+  }
+  endSessionWaiters[again.id] = true;
+  let moved = null;
+  try {
+    moved = await waitForEndSession(again.id, 90000);
+  } finally {
+    delete endSessionWaiters[again.id];
+  }
+  if (moved && moved.message) alert(moved.message);
+  else alert(stillFilingMessage());
+}
+
+var matchChooser = null;
+var campaignList = null;
+var campaignListPromise = null;
+
+function rememberPendingChoice(item, result) {
+  if (!result || !result.needsChoice) return;
+  writeStoredJson('pnPendingChoice', {
+    property: (item.row && item.row.property) || '',
+    location: (item.row && item.row.location) || '',
+    inspector: (item.row && item.row.inspector) || '',
+    ids: ((item.row && item.row.ids) || []).slice(),
+    candidates: result.candidates || [],
+    message: result.message || '',
+  });
+}
+
+function clearPendingChoice() {
+  try { localStorage.removeItem('pnPendingChoice'); } catch (err) {}
+}
+
+function showMatchChooser(session, filed) {
+  if (matchChooser) return matchChooser.promise;
+  const typed = session && session.property ? session.property : 'this property';
+  document.getElementById('matchSubtitle').textContent = 'No confident match for “' + typed + '”.';
+  const list = document.getElementById('matchCandidates');
+  list.innerHTML = '';
+  const candidates = (filed && filed.candidates) || (session && session.candidates) || [];
+  candidates.forEach(function (item) { list.appendChild(matchChoiceButton(item)); });
+  const search = document.getElementById('matchSearch');
+  search.value = '';
+  document.getElementById('matchResults').innerHTML = '';
+  document.getElementById('matchSearchStatus').textContent = '';
+  document.getElementById('matchSheet').style.display = 'flex';
+  let resolveChoice;
+  const promise = new Promise(function (resolve) { resolveChoice = resolve; });
+  matchChooser = { resolve: resolveChoice, promise: promise, session: session };
+  loadMatchCatalog();
+  return promise;
+}
+
+function matchChoiceButton(item) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-secondary match-choice';
+  const name = document.createElement('span');
+  name.textContent = item.name || 'Untitled';
+  btn.appendChild(name);
+  if (item.folderName) {
+    const sub = document.createElement('small');
+    sub.textContent = item.folderName;
+    btn.appendChild(sub);
+  }
+  btn.addEventListener('click', function () {
+    settleMatchChoice({
+      workbookId: item.workbookId || item.id,
+      folderId: item.folderId || '',
+      name: item.name || '',
+    });
+  });
+  return btn;
+}
+
+function settleMatchChoice(choice) {
+  const current = matchChooser;
+  if (!current) return;
+  matchChooser = null;
+  document.getElementById('matchSheet').style.display = 'none';
+  current.resolve(choice || null);
+}
+
+function keepMatchInPhotoNotes() {
+  settleMatchChoice(null);
+}
+
+function normalizeSearchText(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function renderMatchSearch(query) {
+  const box = document.getElementById('matchResults');
+  const status = document.getElementById('matchSearchStatus');
+  box.innerHTML = '';
+  const q = normalizeSearchText(query);
+  if (!q) {
+    if (campaignList) status.textContent = '';
+    return;
+  }
+  if (!campaignList) return;
+  const tokens = q.split(' ');
+  let shown = 0;
+  for (let i = 0; i < campaignList.length && shown < 20; i++) {
+    const name = normalizeSearchText(campaignList[i].name);
+    let ok = true;
+    for (let t = 0; t < tokens.length; t++) {
+      if (name.indexOf(tokens[t]) === -1) ok = false;
+    }
+    if (!ok) continue;
+    box.appendChild(matchChoiceButton(campaignList[i]));
+    shown++;
+  }
+  status.textContent = shown ? '' : 'No property with that name.';
+}
+
+function loadMatchCatalog() {
+  if (campaignList) return;
+  const status = document.getElementById('matchSearchStatus');
+  status.textContent = 'Loading properties…';
+  if (!campaignListPromise) {
+    campaignListPromise = postJson({ action: 'listCampaignWorkbooks' }).then(function (saved) {
+      if (!saved.success) throw new Error(saved.error || 'list failed');
+      campaignList = (saved.result && saved.result.workbooks) || [];
+      return campaignList;
+    }, function (err) {
+      campaignListPromise = null;
+      throw err;
+    });
+  }
+  campaignListPromise.then(function () {
+    if (!matchChooser) return;
+    status.textContent = '';
+    renderMatchSearch(document.getElementById('matchSearch').value);
+  }, function () {
+    if (!matchChooser) return;
+    status.textContent = 'Property list didn’t load. Suggestions above still work.';
+  });
+}
+
+function resolvePendingChoice(pending, choice) {
+  if (!choice) {
+    clearPendingChoice();
+    alert((pending && pending.message) || 'Photos left in PhotoNotes');
+    return;
+  }
+  enqueueEndSession({
+    property: pending.property,
+    location: pending.location,
+    inspector: pending.inspector,
+    ids: pending.ids || [],
+    workbookId: choice.workbookId,
+    folderId: choice.folderId || '',
+  }).then(function (queued) {
+    clearPendingChoice();
+    if (!navigator.onLine) {
+      alert(offlineFilingMessage());
+      return;
+    }
+    endSessionWaiters[queued.id] = true;
+    waitForEndSession(queued.id, 90000).then(function (filed) {
+      delete endSessionWaiters[queued.id];
+      if (filed && filed.message) alert(filed.message);
+      else alert(stillFilingMessage());
+    });
+  });
+}
+
+function resumePendingChoice() {
+  const pending = readStoredJson('pnPendingChoice');
+  if (!pending || !pending.ids || !pending.ids.length || matchChooser) return;
+  showMatchChooser(pending, pending).then(function (choice) {
+    resolvePendingChoice(pending, choice);
+  });
 }
 
 // ─── Photo ────────────────────────────────────────────────────────────────────
@@ -865,32 +1274,17 @@ function resetPhotoScreen() {
 // ─── Next Photo ───────────────────────────────────────────────────────────────
 // Validate, resize, and store on this phone, then clear the screen.
 // The network upload happens from the queue and must not block the next photo.
+// End Session and New Unit call the same submitCurrentEntry path.
 async function nextPhoto() {
   if (capturing) return;
-  const category = document.getElementById('inputCategory').value.trim();
-  const note     = document.getElementById('inputNote').value.trim();
-
-  if (!category && !note && !state.currentPhotoFile) {
+  if (!readPendingEntry().hasPending) {
     alert('Add at least a photo or fill in one field before continuing.');
     return;
   }
 
-  const url = getSheetsUrl();
-  if (!url) {
-    showSendToast('failed', '⚠ No Sheets URL — go to Settings');
-    return;
-  }
-
   capturing = true;
-  showSendToast('sending', 'Saving on this phone...');
   try {
-    const localUrl = await captureCurrentItem(category, note);
-    addToSessionLog(category, note, '', localUrl);
-    resetPhotoScreen();
-    showSendToast('sent', '✓ Saved on this phone');
-    scheduleHideToast(1600);
-  } catch (err) {
-    showSendToast('failed', '✗ Could not save on this phone — try again');
+    await submitCurrentEntry();
   } finally {
     capturing = false;
   }
@@ -1060,6 +1454,8 @@ var photoNotesConfig = {
 
 var capturing = false;
 var toastTimer = null;
+var endSessionResults = {};
+var endSessionWaiters = {};
 var enqueueSeq = 0;
 var pendingCount = 0;
 var badgeState = 'idle';
@@ -1408,7 +1804,8 @@ async function captureCurrentItem(category, note) {
   var blob = null;
   if (state.currentPhotoFile) blob = await resizePhoto(state.currentPhotoFile);
   var localUrl = blob ? URL.createObjectURL(blob) : '';
-  await enqueuePhotoRow({ category: category, note: note, blob: blob });
+  var item = await enqueuePhotoRow({ category: category, note: note, blob: blob });
+  rememberSessionPhoto(item.id);
   state.currentPhotoFile = null;
   state.currentItemLocalUrl = null;
   var input = document.getElementById('photoFileInput');
@@ -1529,12 +1926,31 @@ async function processReadyItems() {
       scheduleQueueRetry(wait);
       return;
     }
+    if (item.kind === 'endSession' && await endSessionWaitingOnPhotos(item)) {
+      var head = await getAllItems();
+      head.sort(compareQueueItems);
+      if (!head.length || head[0].id === item.id) {
+        item.nextAttemptAt = Date.now() + 400;
+        await idbPut(item);
+        scheduleQueueRetry(400);
+        return;
+      }
+      continue;
+    }
     badgeState = 'uploading';
     renderQueueBadge();
     var outcome = await sendWithTimeout(item);
     if (outcome.ok) {
       await idbDelete(item.id);
       continue;
+    }
+    if (outcome.delayMs) {
+      item.nextAttemptAt = Date.now() + outcome.delayMs;
+      await idbPut(item);
+      badgeState = 'waiting-retry';
+      renderQueueBadge();
+      scheduleQueueRetry(outcome.delayMs);
+      return;
     }
     item.attempts = (item.attempts || 0) + 1;
     item.lastError = outcome.error || 'failed';
@@ -1557,9 +1973,46 @@ function scheduleQueueRetry(ms) {
   }, Math.max(50, ms));
 }
 
+async function endSessionWaitingOnPhotos(item) {
+  var ids = (item.row && item.row.ids) || [];
+  var items = await getAllItems();
+  var latest = 0;
+  var waiting = false;
+  for (var i = 0; i < items.length; i++) {
+    var other = items[i];
+    if (other.kind === 'photoRow' && ids.indexOf(other.id) !== -1) {
+      waiting = true;
+      if ((other.createdAt || 0) >= latest) latest = other.createdAt || 0;
+    }
+  }
+  if (!waiting) return false;
+  if ((item.createdAt || 0) <= latest) {
+    item.createdAt = latest + 1;
+    await idbPut(item);
+  }
+  return true;
+}
+
+function finishEndSession(id, message, result) {
+  if (!id || !message) return;
+  endSessionResults[id] = {
+    message: message,
+    needsChoice: !!(result && result.needsChoice),
+    candidates: (result && result.candidates) || [],
+    matched: !!(result && result.matched),
+  };
+  if (endSessionWaiters[id]) return;
+  if (endSessionResults[id].needsChoice) {
+    resumePendingChoice();
+    return;
+  }
+  alert(message);
+}
+
 async function sendWithTimeout(item) {
   var ctrl = new AbortController();
-  var timer = setTimeout(function () { ctrl.abort(); }, photoNotesConfig.timeoutMs);
+  var limit = item.kind === 'endSession' ? 55000 : photoNotesConfig.timeoutMs;
+  var timer = setTimeout(function () { ctrl.abort(); }, limit);
   try {
     return await deliverItem(item, ctrl.signal);
   } catch (err) {
@@ -1609,6 +2062,25 @@ async function postJson(payload, signal) {
 }
 
 async function deliverItem(item, signal) {
+  if (item.kind === 'endSession') {
+    var payload = {
+      action: 'endSession',
+      id: item.id,
+      property: item.row.property || '',
+      location: item.row.location || '',
+      inspector: item.row.inspector || '',
+      ids: item.row.ids || [],
+    };
+    if (item.row.workbookId) payload.workbookId = item.row.workbookId;
+    if (item.row.folderId) payload.folderId = item.row.folderId;
+    var saved = await postJson(payload, signal);
+    if (!saved.success) return { ok: false, error: saved.error || 'endSession failed' };
+    var message = (saved.result && saved.result.message) || 'Session filed.';
+    rememberPendingChoice(item, saved.result);
+    finishEndSession(item.id, message, saved.result);
+    return { ok: true };
+  }
+
   if (item.kind === 'followUp') {
     var follow = await postJson({
       action: 'submitFollowUp',
@@ -1707,8 +2179,26 @@ function esc(str) {
   return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+// A home-screen shortcut can be /?user=Jeff. The name must match a sign-in
+// option. The query stays in the address bar so the shortcut still works
+// the next time the phone opens it. An unknown name is ignored.
+function signedInNameFromUrl() {
+  let raw = '';
+  try { raw = new URLSearchParams(window.location.search).get('user') || ''; } catch (err) { return ''; }
+  raw = raw.trim().toLowerCase();
+  if (!raw) return '';
+  const options = document.querySelectorAll('#signinSelect option');
+  for (let i = 0; i < options.length; i++) {
+    const value = options[i].value;
+    if (value && value.toLowerCase() === raw) return value;
+  }
+  return '';
+}
+
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 auth.load();
+const linkedName = signedInNameFromUrl();
+if (linkedName) auth.save(linkedName);
 if (auth.name) {
   // Already signed in — go straight to session screen
   loadDropdowns();
@@ -1741,6 +2231,10 @@ window.addEventListener('beforeunload', function (e) {
     e.returnValue = 'Photos are still waiting to upload on this phone.';
   }
 });
+document.getElementById('matchSearch').addEventListener('input', function () {
+  renderMatchSearch(this.value);
+});
+resumePendingChoice();
 kickQueue();
 </script>
 </body>
