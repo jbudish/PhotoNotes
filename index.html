@@ -739,22 +739,61 @@ function startUnit() {
   showScreen('screen-photo');
 }
 
+function readPendingEntry() {
+  const category = document.getElementById('inputCategory').value.trim();
+  const note = document.getElementById('inputNote').value.trim();
+  return {
+    category: category,
+    note: note,
+    // Same rule as Next Photo: category, note, or a photo is an entry.
+    hasPending: !!(category || note || state.currentPhotoFile),
+  };
+}
+
+// Queues the open entry with the Next Photo path (resize, client id, IndexedDB
+// retry). Caller must hold `capturing`. Returns 'empty', 'saved', or 'failed'.
+// On failure the form is left as-is so the entry is not discarded.
+async function submitCurrentEntry() {
+  const pending = readPendingEntry();
+  if (!pending.hasPending) return 'empty';
+
+  const url = getSheetsUrl();
+  if (!url) {
+    showSendToast('failed', '⚠ No Sheets URL — go to Settings');
+    return 'failed';
+  }
+
+  showSendToast('sending', 'Saving on this phone...');
+  let localUrl;
+  try {
+    localUrl = await captureCurrentItem(pending.category, pending.note);
+  } catch (err) {
+    showSendToast('failed', '✗ Could not save on this phone — try again');
+    return 'failed';
+  }
+
+  // The queue owns the entry now. Clear the fields before any other UI work
+  // so a second tap cannot enqueue this same note or photo again.
+  document.getElementById('inputCategory').value = '';
+  document.getElementById('inputNote').value = '';
+  try { addToSessionLog(pending.category, pending.note, '', localUrl); } catch (err) {}
+  resetPhotoScreen();
+  showSendToast('sent', '✓ Saved on this phone');
+  scheduleHideToast(1600);
+  return 'saved';
+}
+
 async function newUnit() {
   if (capturing) return;
-  const category = document.getElementById('inputCategory').value.trim();
-  const note     = document.getElementById('inputNote').value.trim();
-  const hasData  = category || note || state.currentPhotoFile;
-  if (hasData) {
-    capturing = true;
-    try {
-      await captureCurrentItem(category, note);
-    } catch (err) {
-      alert('Could not save the current photo on this phone. It was not discarded.');
-      return;
-    } finally {
-      capturing = false;
-    }
+  capturing = true;
+  let proceed = false;
+  try {
+    const result = await submitCurrentEntry();
+    proceed = result === 'empty' || result === 'saved';
+  } finally {
+    capturing = false;
   }
+  if (!proceed) return;
   state.unit = '';
   document.getElementById('inputUnit').value = '';
   state.sessionLog = [];
@@ -765,23 +804,13 @@ async function newUnit() {
 
 async function endSession() {
   if (capturing) return;
-  const category = document.getElementById('inputCategory').value.trim();
-  const note     = document.getElementById('inputNote').value.trim();
-  const hasData  = category || note || state.currentPhotoFile;
-
   capturing = true;
+  let proceed = false;
   try {
-    // The current form is queued first. End Session never deletes the queue.
-    if (hasData) {
-      try {
-        showSendToast('sending', 'Saving on this phone...');
-        await captureCurrentItem(category, note);
-      } catch (err) {
-        showSendToast('failed', '✗ Could not save on this phone — stay on this page');
-        alert('Could not save the current photo on this phone. Stay here and try End Session again so it is not lost.');
-        return;
-      }
-    }
+    // Queue the open entry first. End Session never deletes the queue.
+    const result = await submitCurrentEntry();
+    proceed = result === 'empty' || result === 'saved';
+    if (!proceed) return;
     const left = await countQueueItems();
     if (left > 0) {
       alert(left + (left === 1 ? ' item is' : ' items are') + ' still saved on this phone and waiting to upload. They will not be discarded. Reopen PhotoNotes when you have a signal, and do not clear this site’s data.');
@@ -789,6 +818,7 @@ async function endSession() {
   } finally {
     capturing = false;
   }
+  if (!proceed) return;
 
   state.property = '';
   state.location = '';
@@ -864,32 +894,17 @@ function resetPhotoScreen() {
 // ─── Next Photo ───────────────────────────────────────────────────────────────
 // Validate, resize, and store on this phone, then clear the screen.
 // The network upload happens from the queue and must not block the next photo.
+// End Session and New Unit call the same submitCurrentEntry path.
 async function nextPhoto() {
   if (capturing) return;
-  const category = document.getElementById('inputCategory').value.trim();
-  const note     = document.getElementById('inputNote').value.trim();
-
-  if (!category && !note && !state.currentPhotoFile) {
+  if (!readPendingEntry().hasPending) {
     alert('Add at least a photo or fill in one field before continuing.');
     return;
   }
 
-  const url = getSheetsUrl();
-  if (!url) {
-    showSendToast('failed', '⚠ No Sheets URL — go to Settings');
-    return;
-  }
-
   capturing = true;
-  showSendToast('sending', 'Saving on this phone...');
   try {
-    const localUrl = await captureCurrentItem(category, note);
-    addToSessionLog(category, note, '', localUrl);
-    resetPhotoScreen();
-    showSendToast('sent', '✓ Saved on this phone');
-    scheduleHideToast(1600);
-  } catch (err) {
-    showSendToast('failed', '✗ Could not save on this phone — try again');
+    await submitCurrentEntry();
   } finally {
     capturing = false;
   }

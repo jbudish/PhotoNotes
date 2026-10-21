@@ -41,11 +41,14 @@ var CONFIG = {
   // Walk-through rows. Leave '' to use the first tab that is not one of the
   // helper tabs below (safest when this script is bound to the existing sheet).
   // Set a name only if the rows live on a specific tab, e.g. 'Sheet1'.
-  ROWS_SHEET_NAME: '',
+  // Jeff's sheet: walk-through rows live on the 'PhotoNotes' tab (first tab).
+  // Pinned so the old 'Inspections' tab can never be picked by mistake.
+  ROWS_SHEET_NAME: 'PhotoNotes',
 
   // Created if missing. Point this at the existing follow-up tab if it has
   // another name (Follow Up, Follow-ups, …).
-  FOLLOWUP_SHEET_NAME: 'FollowUps',
+  // Jeff's sheet: the existing tab is 'FollowUp' (singular).
+  FOLLOWUP_SHEET_NAME: 'FollowUp',
 
   // Optional. Column A is the category list for getDropdowns. When the tab
   // is missing, categories are the unique values already in the rows tab.
@@ -65,8 +68,19 @@ var CONFIG = {
   // An existing header row is matched by name (any order). A sheet that
   // already has data and no header is appended in this order and is not
   // rewritten. An empty sheet gets this header row.
-  ROW_HEADERS: ['property', 'unit', 'inspector', 'category', 'note', 'photoUrl', 'location', 'date'],
+  // 'time' added: Jeff's tab has a Time column the old script filled in.
+  ROW_HEADERS: ['property', 'unit', 'inspector', 'category', 'note', 'photoUrl', 'location', 'date', 'time'],
   FOLLOWUP_HEADERS: ['property', 'location', 'category', 'question', 'date'],
+
+  // Live header names on Jeff's 'PhotoNotes' tab that differ from the keys
+  // above (lower-case header -> key). Without these, User, Notes and
+  // Photo link would be left blank on every new row.
+  // Live header row: Property | Unit | Location | User | Category | Notes | Photo link | Date | Time
+  HEADER_ALIASES: {
+    'user': 'inspector',
+    'notes': 'note',
+    'photo link': 'photoUrl',
+  },
 };
 
 // ─── Web app entry ───────────────────────────────────────────────────────────
@@ -316,6 +330,8 @@ function rowValues_(row) {
     photoUrl: row.photoUrl || '',
     location: row.location || '',
     date: row.date || '',
+    // The phone sends only a date; stamp the save time like the old script.
+    time: row.time || Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'h:mm:ss a'),
   };
 }
 
@@ -367,6 +383,8 @@ function headerIndex_(header, name) {
 
 function canonicalHeader_(cell) {
   var text = String(cell || '').trim().toLowerCase();
+  var aliases = CONFIG.HEADER_ALIASES || {};
+  if (Object.prototype.hasOwnProperty.call(aliases, text)) return aliases[text];
   var headers = CONFIG.ROW_HEADERS.concat(CONFIG.FOLLOWUP_HEADERS);
   for (var i = 0; i < headers.length; i++) {
     if (headers[i].toLowerCase() === text) return headers[i];
