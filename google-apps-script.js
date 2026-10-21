@@ -1482,9 +1482,29 @@ function dealHasPhoto_(sheet, photoUrl) {
   return !!(found && found.getRow() > 1);
 }
 
+function isPhotoNotesName_(name) {
+  return String(name || '').replace(/\s+/g, '').toLowerCase() === 'photonotes';
+}
+
+// Property Campaigns/<property>/Photo Notes/… — accept PhotoNotes or Photo Notes.
+function photoNotesFolder_(propertyFolder) {
+  var folders = propertyFolder.getFolders();
+  var loose = null;
+  while (folders.hasNext()) {
+    var folder = folders.next();
+    var name = String(folder.getName() || '');
+    if (!isPhotoNotesName_(name)) continue;
+    if (name.toLowerCase() === 'photo notes') return folder;
+    if (!loose) loose = folder;
+  }
+  if (loose) return loose;
+  return propertyFolder.createFolder('Photo Notes');
+}
+
 function moveSessionPhotos_(fileIds, folderInfo) {
   if (!folderInfo || !folderInfo.id) return { folderName: '' };
   var campaign = DriveApp.getFolderById(folderInfo.id);
+  var notes = photoNotesFolder_(campaign);
   var idSet = {};
   var files = [];
   for (var i = 0; i < fileIds.length; i++) {
@@ -1508,9 +1528,9 @@ function moveSessionPhotos_(fileIds, folderInfo) {
   for (var key in groups) {
     if (!Object.prototype.hasOwnProperty.call(groups, key)) continue;
     var group = groups[key];
-    movePhotoGroup_(group, idSet, campaign);
+    movePhotoGroup_(group, idSet, notes);
   }
-  return { folderName: campaign.getName() };
+  return { folderName: campaign.getName() + '/' + notes.getName() };
 }
 
 function firstParent_(item) {
