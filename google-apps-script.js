@@ -72,9 +72,8 @@ var CONFIG = {
   // Hidden tab of client ids so a retry does not create a second file or row.
   IDS_SHEET_NAME: 'ProcessedIds',
 
-  // Property folders are created inside this Drive folder, with a subfolder
-  // per unit. Set to '' to create property folders directly in My Drive,
-  // which matches a script that never used a parent folder.
+  // New photos are files directly in this Drive folder. No property or unit
+  // subfolders. Set to '' to save files in My Drive instead.
   // If your current photos live in a differently named folder, change this
   // BEFORE deploying or new photos will split into a second tree.
   DRIVE_ROOT_FOLDER_NAME: 'PhotoNotes',
@@ -539,10 +538,11 @@ function tagRowId_(sheet, clientId) {
 // ─── Drive ───────────────────────────────────────────────────────────────────
 
 /**
- * Folder per property, then per unit:
- *   <DRIVE_ROOT_FOLDER_NAME> / <property> / <unit> / file.jpg
+ * One file in <DRIVE_ROOT_FOLDER_NAME>, no subfolders:
+ *   Property_Unit_Category_0000001.jpg
  * uploadPhoto calls the property `unit` and the unit number `subunit`,
  * because that is what the phone has always sent.
+ * Callers already hold the script lock, which is what makes the counter unique.
  */
 function savePhotoFile_(body) {
   var base64 = String(body.base64 || '');
@@ -550,14 +550,10 @@ function savePhotoFile_(body) {
   if (base64.indexOf('data:') === 0 && comma !== -1) base64 = base64.substring(comma + 1);
   if (!base64) throw new Error('Argument cannot be null: data');
 
-  var propertyFolder = getOrCreateChild_(getRootFolder_(), body.unit || 'Unspecified');
-  var folder = body.subunit ? getOrCreateChild_(propertyFolder, body.subunit) : propertyFolder;
-  var filename = sanitizeName_(body.filename || ('photo_' + new Date().getTime() + '.jpg'), 180);
-  if (!/\.jpe?g$/i.test(filename)) filename += '.jpg';
-
+  var filename = photoFileName_(body.unit, body.subunit, body.category, nextPhotoNumber_());
   var bytes = Utilities.base64Decode(base64);
   var blob = Utilities.newBlob(bytes, body.mimeType || 'image/jpeg', filename);
-  var file = folder.createFile(blob);
+  var file = getRootFolder_().createFile(blob);
   // Anyone with the link can open viewUrl. The file stays saved even if the
   // domain blocks public sharing; the row still gets the Drive URL.
   try {
@@ -590,18 +586,41 @@ function getRootFolder_() {
   return DriveApp.createFolder(name);
 }
 
-function getOrCreateChild_(parent, name) {
-  var safe = sanitizeName_(name || 'Unspecified', 80);
-  var found = parent.getFoldersByName(safe);
-  if (found.hasNext()) return found.next();
-  return parent.createFolder(safe);
+function nextPhotoNumber_() {
+  var props = PropertiesService.getScriptProperties();
+  var current = parseInt(props.getProperty('photoNotesCounter') || '0', 10);
+  if (!current || current < 0) current = 0;
+  var next = current + 1;
+  props.setProperty('photoNotesCounter', String(next));
+  return next;
 }
 
-function sanitizeName_(name, maxLen) {
-  var cleaned = String(name || '').replace(/[\\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
-  if (!cleaned) cleaned = 'Unspecified';
-  if (cleaned.length > maxLen) cleaned = cleaned.substring(0, maxLen);
-  return cleaned;
+function padPhotoNumber_(value) {
+  var digits = String(value == null ? '' : value).replace(/\D/g, '');
+  if (!digits) digits = '0';
+  while (digits.length < 7) digits = '0' + digits;
+  return digits;
+}
+
+function fileNamePart_(value, fallback) {
+  var text = String(value || '');
+  text = text.replace(/[\\\/:*?"<>|]/g, '');
+  text = text.replace(/[_\s]+/g, '-');
+  text = text.replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  if (text.length > 60) text = text.substring(0, 60).replace(/-+$/g, '');
+  return text || fallback;
+}
+
+function photoFileName_(property, unit, category, number) {
+  return fileNamePart_(property, 'NoProperty') + '_' +
+    fileNamePart_(unit, 'NoUnit') + '_' +
+    fileNamePart_(category, 'General') + '_' +
+    padPhotoNumber_(number) + '.jpg';
+}
+
+function canonicalPropertyName_(workbookName) {
+  var stripped = stripCampaignSuffix_(workbookName);
+  return String(stripped || workbookName || '').trim();
 }
 
 // ─── End session: file this phone's rows into the deal workbook ─────────────
@@ -680,7 +699,7 @@ function fileChosenWorkbook_(id, ids, property, location, body, catalog) {
 
 function fileMatchedSession_(id, ids, picked) {
   var filed = fileSessionRows_(ids, picked.workbook);
-  var photos = moveSessionPhotos_(filed.fileIds, picked.folder);
+  var photos = moveSessionPhotos_(filed.fileIds, picked.folder, canonicalPropertyName_(picked.workbook && picked.workbook.name));
   var message = filingResultMessage_({
     count: filed.count,
     missing: filed.missing,
@@ -1486,7 +1505,8 @@ function isPhotoNotesName_(name) {
   return String(name || '').replace(/\s+/g, '').toLowerCase() === 'photonotes';
 }
 
-// Property Campaigns/<property>/Photo Notes/… — accept PhotoNotes or Photo Notes.
+// Property Campaigns/<property>/Photo Notes — files sit directly in that folder.
+// Accept PhotoNotes or Photo Notes. Create "Photo Notes" only when neither exists.
 function photoNotesFolder_(propertyFolder) {
   var folders = propertyFolder.getFolders();
   var loose = null;
@@ -1501,41 +1521,43 @@ function photoNotesFolder_(propertyFolder) {
   return propertyFolder.createFolder('Photo Notes');
 }
 
-function moveSessionPhotos_(fileIds, folderInfo) {
+function moveSessionPhotos_(fileIds, folderInfo, canonicalProperty) {
   if (!folderInfo || !folderInfo.id) return { folderName: '' };
   var campaign = DriveApp.getFolderById(folderInfo.id);
   var notes = photoNotesFolder_(campaign);
-  var idSet = {};
-  var files = [];
+  var seen = {};
   for (var i = 0; i < fileIds.length; i++) {
     var fileId = fileIds[i];
-    if (!fileId || idSet[fileId]) continue;
-    idSet[fileId] = true;
+    if (!fileId || seen[fileId]) continue;
+    seen[fileId] = true;
+    var file = null;
     try {
-      var file = DriveApp.getFileById(fileId);
-      if (!file.isTrashed()) files.push(file);
-    } catch (err) {}
-  }
-  var groups = {};
-  for (var f = 0; f < files.length; f++) {
-    var one = files[f];
-    if (isUnderFolder_(one, campaign.getId())) continue;
-    var parent = firstParent_(one);
-    var key = parent ? parent.getId() : '';
-    if (!groups[key]) groups[key] = { folder: parent, files: [] };
-    groups[key].files.push(one);
-  }
-  for (var key in groups) {
-    if (!Object.prototype.hasOwnProperty.call(groups, key)) continue;
-    var group = groups[key];
-    movePhotoGroup_(group, idSet, notes);
+      file = DriveApp.getFileById(fileId);
+      if (file.isTrashed()) file = null;
+    } catch (err) {
+      file = null;
+    }
+    if (!file) continue;
+    // Already filed under this property, including a previous Photo Notes drop.
+    // Leave old subfolders alone; only files still outside the property move.
+    if (isUnderFolder_(file, campaign.getId())) {
+      if (isUnderFolder_(file, notes.getId())) renameFiledPhoto_(file, canonicalProperty);
+      continue;
+    }
+    file.moveTo(notes);
+    renameFiledPhoto_(file, canonicalProperty);
   }
   return { folderName: campaign.getName() + '/' + notes.getName() };
 }
 
-function firstParent_(item) {
-  var parents = item.getParents();
-  return parents.hasNext() ? parents.next() : null;
+function renameFiledPhoto_(file, canonicalProperty) {
+  var canonical = fileNamePart_(canonicalProperty, '');
+  if (!canonical) return;
+  var name = String(file.getName() || '');
+  var match = name.match(/^(.*)_([^_]+)_([^_]+)_(\d{7,})\.jpe?g$/i);
+  if (!match) return;
+  var next = photoFileName_(canonical, match[2], match[3], match[4]);
+  if (next !== name) file.setName(next);
 }
 
 function isUnderFolder_(item, ancestorId) {
@@ -1557,59 +1579,3 @@ function isUnderFolder_(item, ancestorId) {
   return false;
 }
 
-function onlyTheseFiles_(folder, idSet) {
-  if (folder.getFolders().hasNext()) return false;
-  var any = false;
-  var files = folder.getFiles();
-  while (files.hasNext()) {
-    any = true;
-    if (!idSet[files.next().getId()]) return false;
-  }
-  return any;
-}
-
-function folderIsEmpty_(folder) {
-  return !folder.getFiles().hasNext() && !folder.getFolders().hasNext();
-}
-
-function mergeFolderInto_(sourceFolder, destParent) {
-  var existing = destParent.getFoldersByName(sourceFolder.getName());
-  if (!existing.hasNext()) {
-    sourceFolder.moveTo(destParent);
-    return;
-  }
-  var dest = existing.next();
-  var files = sourceFolder.getFiles();
-  while (files.hasNext()) files.next().moveTo(dest);
-  var subs = sourceFolder.getFolders();
-  while (subs.hasNext()) mergeFolderInto_(subs.next(), dest);
-  if (folderIsEmpty_(sourceFolder)) {
-    try { sourceFolder.setTrashed(true); } catch (err) {}
-  }
-}
-
-function movePhotoGroup_(group, idSet, campaign) {
-  if (!group.folder) {
-    for (var i = 0; i < group.files.length; i++) group.files[i].moveTo(campaign);
-    return;
-  }
-  var unitFolder = group.folder;
-  var propertyFolder = firstParent_(unitFolder);
-  var destParent = campaign;
-  if (propertyFolder && propertyFolder.getName() !== CONFIG.DRIVE_ROOT_FOLDER_NAME) {
-    destParent = getOrCreateChild_(campaign, propertyFolder.getName());
-  }
-  if (onlyTheseFiles_(unitFolder, idSet)) {
-    mergeFolderInto_(unitFolder, destParent);
-    if (propertyFolder &&
-        propertyFolder.getName() !== CONFIG.DRIVE_ROOT_FOLDER_NAME &&
-        folderIsEmpty_(propertyFolder)) {
-      try { propertyFolder.setTrashed(true); } catch (err) {}
-    }
-    return;
-  }
-  var destUnit = getOrCreateChild_(destParent, unitFolder.getName());
-  for (var f = 0; f < group.files.length; f++) {
-    if (!isUnderFolder_(group.files[f], campaign.getId())) group.files[f].moveTo(destUnit);
-  }
-}
