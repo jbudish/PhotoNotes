@@ -51,6 +51,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
     padding: 16px 20px 12px;
     flex-shrink: 0;
   }
@@ -61,7 +62,26 @@
     color: #111111;
     letter-spacing: 0.15em;
     text-transform: uppercase;
+    flex-shrink: 0;
   }
+
+  /* Photos waiting on this phone. Stays in the header on every screen. */
+  .queue-badge {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: center;
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .queue-badge[data-state="uploading"] { color: #111111; }
+  .queue-badge[data-state="waiting-signal"] { color: #8a5a00; }
+  .queue-badge[data-state="waiting-retry"] { color: #555555; }
+  #headerRight { flex-shrink: 0; }
 
   .session-info {
     font-family: 'DM Mono', monospace;
@@ -366,6 +386,7 @@
 
   <div class="header">
     <div class="logo" onclick="showScreen('screen-session')" style="cursor:pointer;">PhotoNotes</div>
+    <div id="queueBadge" class="queue-badge" data-state="idle" aria-live="polite">0 waiting</div>
     <div id="headerRight">
       <button class="settings-btn" onclick="showScreen('screen-settings')" title="Settings">⚙</button>
     </div>
@@ -718,13 +739,21 @@ function startUnit() {
   showScreen('screen-photo');
 }
 
-function newUnit() {
-  // Save any pending data first, then go to unit screen
+async function newUnit() {
+  if (capturing) return;
   const category = document.getElementById('inputCategory').value.trim();
   const note     = document.getElementById('inputNote').value.trim();
   const hasData  = category || note || state.currentPhotoFile;
   if (hasData) {
-    if (!confirm('Go to new unit? Unsaved photo/fields will be lost.')) return;
+    capturing = true;
+    try {
+      await captureCurrentItem(category, note);
+    } catch (err) {
+      alert('Could not save the current photo on this phone. It was not discarded.');
+      return;
+    } finally {
+      capturing = false;
+    }
   }
   state.unit = '';
   document.getElementById('inputUnit').value = '';
@@ -735,41 +764,33 @@ function newUnit() {
 }
 
 async function endSession() {
+  if (capturing) return;
   const category = document.getElementById('inputCategory').value.trim();
   const note     = document.getElementById('inputNote').value.trim();
-  
   const hasData  = category || note || state.currentPhotoFile;
 
-  if (hasData) {
-    const url = getSheetsUrl();
-    if (url) {
-      const today = new Date().toLocaleDateString();
-      let photoUrl = '';
-      if (state.currentPhotoFile) {
-        try {
-          const base64 = await compressImage(state.currentPhotoFile);
-          const filename = `${state.property}_${category || 'photo'}_${Date.now()}.jpg`;
-          const resp = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain' },
-            body: JSON.stringify({ action: 'uploadPhoto', unit: state.property, subunit: state.unit, category: category || 'photo', filename, mimeType: state.currentPhotoFile.type || 'image/jpeg', base64 }),
-          });
-          const result = await resp.json();
-          if (result.success) photoUrl = result.viewUrl;
-        } catch(e) {}
-      }
+  capturing = true;
+  try {
+    // The current form is queued first. End Session never deletes the queue.
+    if (hasData) {
       try {
-        await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain' },
-          body: JSON.stringify({ action: 'submitRows', rows: [{ property: state.property, unit: state.unit, inspector: auth.name, category, note, photoUrl, location: state.location, date: today }] }),
-        });
-      } catch(e) {}
+        showSendToast('sending', 'Saving on this phone...');
+        await captureCurrentItem(category, note);
+      } catch (err) {
+        showSendToast('failed', '✗ Could not save on this phone — stay on this page');
+        alert('Could not save the current photo on this phone. Stay here and try End Session again so it is not lost.');
+        return;
+      }
     }
+    const left = await countQueueItems();
+    if (left > 0) {
+      alert(left + (left === 1 ? ' item is' : ' items are') + ' still saved on this phone and waiting to upload. They will not be discarded. Reopen PhotoNotes when you have a signal, and do not clear this site’s data.');
+    }
+  } finally {
+    capturing = false;
   }
 
   state.property = '';
-  
   state.location = '';
   state.currentPhotoFile = null;
   state.currentItemLocalUrl = null;
@@ -810,8 +831,8 @@ function addToSessionLog(category, note, photoUrl, localUrl) {
   const hasPhoto = !!(photoUrl || localUrl);
   const linkUrl = photoUrl || localUrl || '';
   row.innerHTML = `
-    <div class="log-cat">${cat}</div>
-    <div class="log-note">${noteShort}</div>
+    <div class="log-cat">${esc(cat)}</div>
+    <div class="log-note">${esc(noteShort)}</div>
     <button class="log-photo-btn ${hasPhoto ? '' : 'no-photo'}" onclick="openPhoto('${linkUrl}')">
       ${hasPhoto ? '📷 View' : 'No photo'}
     </button>`;
@@ -841,10 +862,12 @@ function resetPhotoScreen() {
 }
 
 // ─── Next Photo ───────────────────────────────────────────────────────────────
+// Validate, resize, and store on this phone, then clear the screen.
+// The network upload happens from the queue and must not block the next photo.
 async function nextPhoto() {
+  if (capturing) return;
   const category = document.getElementById('inputCategory').value.trim();
   const note     = document.getElementById('inputNote').value.trim();
-  
 
   if (!category && !note && !state.currentPhotoFile) {
     alert('Add at least a photo or fill in one field before continuing.');
@@ -857,71 +880,34 @@ async function nextPhoto() {
     return;
   }
 
-  showSendToast('sending', 'Saving...');
-
-  const today = new Date().toLocaleDateString();
-  const location = state.location;
-  let photoUrl = '';
-
-  // Upload photo first, then submit row with link
-  if (state.currentPhotoFile) {
-    try {
-      const base64 = await compressImage(state.currentPhotoFile);
-      const filename = `${state.property}_${category || 'photo'}_${Date.now()}.jpg`;
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain' },
-        body: JSON.stringify({
-          action: 'uploadPhoto',
-          unit: state.property,
-          subunit: state.unit,
-          category: category || 'photo',
-          filename: filename,
-          mimeType: state.currentPhotoFile.type || 'image/jpeg',
-          base64: base64,
-        }),
-      });
-      const result = await resp.json();
-      if (result.success) photoUrl = result.viewUrl;
-    } catch(e) { /* photo upload failed, continue without */ }
-  }
-
-  // Submit row with photo link
+  capturing = true;
+  showSendToast('sending', 'Saving on this phone...');
   try {
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: JSON.stringify({
-        action: 'submitRows',
-        rows: [{
-          property: state.property,
-          unit: state.unit,
-          inspector: auth.name,
-          category: category,
-          note: note,
-          photoUrl: photoUrl,
-          location: location,
-          date: today,
-        }],
-      }),
-    });
-    const result = await resp.json();
-    if (!result.success) throw new Error(result.error);
-    showSendToast('sent', '✓ Saved' + (photoUrl ? ' + photo' : ''));
-    addToSessionLog(category, note, state.currentItemLocalUrl || '', state.currentItemLocalUrl || '');
-    setTimeout(() => resetPhotoScreen(), 800);
-  } catch(e) {
-    showSendToast('failed', '✗ Failed to save — check connection');
+    const localUrl = await captureCurrentItem(category, note);
+    addToSessionLog(category, note, '', localUrl);
+    resetPhotoScreen();
+    showSendToast('sent', '✓ Saved on this phone');
+    scheduleHideToast(1600);
+  } catch (err) {
+    showSendToast('failed', '✗ Could not save on this phone — try again');
+  } finally {
+    capturing = false;
   }
 }
 
 function showSendToast(type, msg) {
+  if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
   const toast = document.getElementById('sendToast');
   const spacer = document.getElementById('sendToastSpacer');
   const spinner = type === 'sending' ? '<div class="spinner"></div>' : '';
   toast.className = `send-toast ${type}`;
   toast.innerHTML = `${spinner}${msg}`;
   spacer.style.height = '8px';
+}
+
+function scheduleHideToast(ms) {
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideSendToast, ms || 1600);
 }
 
 function hideSendToast() {
@@ -997,22 +983,32 @@ async function submitFollowUp() {
     document.getElementById('fuToast').innerHTML = '<div style="font-size:13px;color:#c62828;">No Sheets URL configured.</div>';
     return;
   }
-  document.getElementById('fuToast').innerHTML = '<div style="font-size:13px;color:#888;">Saving...</div>';
-  // Fire and close — script completes server-side even if response can't be read cross-origin
-  fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
-    body: JSON.stringify({
-      action: 'submitFollowUp',
+  document.getElementById('fuToast').innerHTML = '<div style="font-size:13px;color:#888;">Saving on this phone...</div>';
+  try {
+    await enqueueItem({
+      id: newClientId(),
+      kind: 'followUp',
+      blob: null,
+      filename: '',
       row: {
         property: state.property,
         location: state.location,
         category: category,
         question: question,
         date: new Date().toLocaleDateString(),
-      }
-    }),
-  }).catch(() => {});
+      },
+      createdAt: Date.now(),
+      seq: ++enqueueSeq,
+      attempts: 0,
+      nextAttemptAt: 0,
+      lastError: '',
+      uploadedViewUrl: '',
+    });
+  } catch (err) {
+    document.getElementById('fuToast').innerHTML = '<div style="font-size:13px;color:#c62828;">Could not save on this phone. Try again.</div>';
+    return;
+  }
+  document.getElementById('fuToast').innerHTML = '<div style="font-size:13px;color:#2e7d32;">Saved on this phone</div>';
   setTimeout(() => closeFollowUp(), 400);
 }
 
@@ -1047,37 +1043,662 @@ function getLocation() {
   });
 }
 
-// ─── Utility ──────────────────────────────────────────────────────────────────
-function fileToBase64(file) {
-  return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result.split(',')[1]);
-    r.onerror = () => rej(new Error('Read failed'));
-    r.readAsDataURL(file);
+// ─── Resize + durable upload queue ───────────────────────────────────────────
+// Change photo size and JPEG quality here. 800px on the long edge at 0.5
+// is about 50–80 KB for a normal phone photo.
+var photoNotesConfig = {
+  maxEdge: 800,
+  jpegQuality: 0.5,
+  timeoutMs: 30000,
+  backoffBaseMs: 2000,
+  backoffCapMs: 5 * 60 * 1000,
+  dbName: 'photonotes',
+  storeName: 'queue',
+  lockName: 'photonotes-upload',
+};
+
+var capturing = false;
+var toastTimer = null;
+var enqueueSeq = 0;
+var pendingCount = 0;
+var badgeState = 'idle';
+var workerRunning = false;
+var kickAgain = false;
+var pendingForce = false;
+var retryTimer = null;
+var legacyUpload = false;
+var dbPromise = null;
+
+function newClientId() {
+  if (window.crypto && typeof crypto.randomUUID === 'function') {
+    try { return crypto.randomUUID(); } catch (err) {}
+  }
+  var bytes = new Uint8Array(16);
+  if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
+  else for (var i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  var hex = '';
+  for (var b = 0; b < bytes.length; b++) hex += bytes[b].toString(16).padStart(2, '0');
+  return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) + '-' + hex.slice(16, 20) + '-' + hex.slice(20);
+}
+
+function fitDimensions(width, height, maxEdge) {
+  var longEdge = Math.max(width, height);
+  if (!longEdge || longEdge <= maxEdge) {
+    return { width: Math.max(1, width), height: Math.max(1, height) };
+  }
+  var scale = maxEdge / longEdge;
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+function orientedSize(width, height, orientation) {
+  if (orientation >= 5 && orientation <= 8) return { width: height, height: width };
+  return { width: width, height: height };
+}
+
+// JPEG SOF + EXIF orientation from the header only. Never reads the whole file as a data URL.
+async function readJpegGeometry(file) {
+  try {
+    var head = await file.slice(0, 256 * 1024).arrayBuffer();
+    var view = new DataView(head);
+    if (view.byteLength < 4 || view.getUint16(0) !== 0xFFD8) return null;
+    var offset = 2;
+    var orientation = 1;
+    var width = 0;
+    var height = 0;
+    while (offset + 4 < view.byteLength) {
+      if (view.getUint8(offset) !== 0xFF) { offset++; continue; }
+      var marker = view.getUint8(offset + 1);
+      // 0xFF padding before a real marker.
+      if (marker === 0xFF) { offset++; continue; }
+      if (marker === 0xD8 || marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { offset += 2; continue; }
+      if (marker === 0xD9 || marker === 0xDA) break;
+      var size = view.getUint16(offset + 2);
+      if (size < 2 || offset + 2 + size > view.byteLength) break;
+      if (marker === 0xE1) {
+        var parsed = readExifOrientation(view, offset + 4, size - 2);
+        if (parsed) orientation = parsed;
+      }
+      var isSof = (marker >= 0xC0 && marker <= 0xC3) || (marker >= 0xC5 && marker <= 0xC7) ||
+        (marker >= 0xC9 && marker <= 0xCB) || (marker >= 0xCD && marker <= 0xCF);
+      if (isSof && offset + 9 < view.byteLength) {
+        height = view.getUint16(offset + 5);
+        width = view.getUint16(offset + 7);
+      }
+      offset += 2 + size;
+    }
+    if (!width || !height) return null;
+    return { width: width, height: height, orientation: orientation };
+  } catch (err) {
+    return null;
+  }
+}
+
+function readExifOrientation(view, start, length) {
+  if (length < 14) return 0;
+  if (view.getUint8(start) !== 0x45 || view.getUint8(start + 1) !== 0x78 ||
+      view.getUint8(start + 2) !== 0x69 || view.getUint8(start + 3) !== 0x66) return 0;
+  var tiff = start + 6;
+  var little = view.getUint16(tiff) === 0x4949;
+  if (!little && view.getUint16(tiff) !== 0x4D4D) return 0;
+  var u16 = function (pos) { return view.getUint16(pos, little); };
+  var u32 = function (pos) { return view.getUint32(pos, little); };
+  if (u16(tiff + 2) !== 0x002A) return 0;
+  var ifd = tiff + u32(tiff + 4);
+  if (ifd + 2 > start + length) return 0;
+  var entries = u16(ifd);
+  for (var i = 0; i < entries; i++) {
+    var entry = ifd + 2 + i * 12;
+    if (entry + 12 > view.byteLength) break;
+    if (u16(entry) === 0x0112) return u16(entry + 8);
+  }
+  return 0;
+}
+
+async function createOrientedBitmap(file, resize) {
+  var attempts = [];
+  if (resize) {
+    attempts.push({
+      imageOrientation: 'from-image',
+      resizeWidth: resize.width,
+      resizeHeight: resize.height,
+      resizeQuality: 'high',
+    });
+  }
+  attempts.push({ imageOrientation: 'from-image' });
+  attempts.push(null);
+  var lastErr = null;
+  for (var i = 0; i < attempts.length; i++) {
+    try {
+      if (attempts[i]) return await createImageBitmap(file, attempts[i]);
+      return await createImageBitmap(file);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('Could not decode photo');
+}
+
+async function rasterToJpegBlob(source, width, height, draw) {
+  if (typeof OffscreenCanvas !== 'undefined') {
+    try {
+      var off = new OffscreenCanvas(width, height);
+      var octx = off.getContext('2d', { alpha: false });
+      octx.fillStyle = '#ffffff';
+      octx.fillRect(0, 0, width, height);
+      octx.imageSmoothingEnabled = true;
+      octx.imageSmoothingQuality = 'high';
+      if (draw) draw(octx, width, height);
+      else octx.drawImage(source, 0, 0, width, height);
+      var blob = await off.convertToBlob({ type: 'image/jpeg', quality: photoNotesConfig.jpegQuality });
+      if (blob) return blob;
+    } catch (err) {}
+  }
+  var canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  var ctx = canvas.getContext('2d', { alpha: false });
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  if (draw) draw(ctx, width, height);
+  else ctx.drawImage(source, 0, 0, width, height);
+  var out = await new Promise(function (resolve) {
+    if (canvas.toBlob) canvas.toBlob(resolve, 'image/jpeg', photoNotesConfig.jpegQuality);
+    else resolve(null);
+  });
+  if (out) return out;
+  // Last resort is the already-small canvas, not the original file.
+  var dataUrl = canvas.toDataURL('image/jpeg', photoNotesConfig.jpegQuality);
+  var res = await fetch(dataUrl);
+  return await res.blob();
+}
+
+async function resizePhoto(file) {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      return await resizeViaBitmap(file);
+    } catch (err) {}
+  }
+  return await resizeViaImageElement(file);
+}
+
+async function resizeViaBitmap(file) {
+  var geo = await readJpegGeometry(file);
+  var target = null;
+  if (geo) {
+    var oriented = orientedSize(geo.width, geo.height, geo.orientation || 1);
+    target = fitDimensions(oriented.width, oriented.height, photoNotesConfig.maxEdge);
+  }
+  var bitmap = await createOrientedBitmap(file, target);
+  // Resize options that ignore EXIF can stretch the photo. Decode again, unscaled, and fit on the canvas.
+  if (target && bitmap.width && bitmap.height) {
+    var requestedAspect = target.width / target.height;
+    var actualAspect = bitmap.width / bitmap.height;
+    if (Math.abs(requestedAspect - actualAspect) > 0.02) {
+      if (bitmap.close) bitmap.close();
+      bitmap = await createOrientedBitmap(file, null);
+    }
+  }
+  try {
+    var fitted = fitDimensions(bitmap.width, bitmap.height, photoNotesConfig.maxEdge);
+    return await rasterToJpegBlob(bitmap, fitted.width, fitted.height);
+  } finally {
+    if (bitmap.close) bitmap.close();
+  }
+}
+
+function loadImageElement(file) {
+  return new Promise(function (resolve, reject) {
+    var url = URL.createObjectURL(file);
+    var img = new Image();
+    img.onload = function () { resolve({ img: img, url: url }); };
+    img.onerror = function () {
+      URL.revokeObjectURL(url);
+      reject(new Error('Could not decode photo'));
+    };
+    img.src = url;
   });
 }
 
-// Compress image before upload: resizes to max 1200px, quality 0.7
-// Reduces typical phone photo from ~4MB to ~150-250KB
-function compressImage(file, maxPx = 1200, quality = 0.7) {
-  return new Promise((res) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onload = () => {
-        const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
-        const w = Math.round(img.width * scale);
-        const h = Math.round(img.height * scale);
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        const dataUrl = canvas.toDataURL('image/jpeg', quality);
-        res(dataUrl.split(',')[1]); // return base64 only
-      };
-      img.src = e.target.result;
+function drawWithOrientation(ctx, img, orientation, outW, outH) {
+  var swap = orientation >= 5 && orientation <= 8;
+  var dw = swap ? outH : outW;
+  var dh = swap ? outW : outH;
+  switch (orientation) {
+    case 2: ctx.transform(-1, 0, 0, 1, outW, 0); break;
+    case 3: ctx.transform(-1, 0, 0, -1, outW, outH); break;
+    case 4: ctx.transform(1, 0, 0, -1, 0, outH); break;
+    case 5: ctx.transform(0, 1, 1, 0, 0, 0); break;
+    case 6: ctx.transform(0, 1, -1, 0, outH, 0); break;
+    case 7: ctx.transform(0, -1, -1, 0, outH, outW); break;
+    case 8: ctx.transform(0, -1, 1, 0, 0, outW); break;
+    default: break;
+  }
+  ctx.drawImage(img, 0, 0, dw, dh);
+}
+
+async function resizeViaImageElement(file) {
+  var geo = await readJpegGeometry(file);
+  var loaded = await loadImageElement(file);
+  try {
+    var img = loaded.img;
+    var orientation = 1;
+    if (geo && geo.orientation > 1) {
+      var rawMatch = img.naturalWidth === geo.width && img.naturalHeight === geo.height;
+      if (rawMatch) orientation = geo.orientation;
+    }
+    var displayed = orientedSize(img.naturalWidth, img.naturalHeight, orientation);
+    var fitted = fitDimensions(displayed.width, displayed.height, photoNotesConfig.maxEdge);
+    return await rasterToJpegBlob(img, fitted.width, fitted.height, function (ctx) {
+      drawWithOrientation(ctx, img, orientation, fitted.width, fitted.height);
+    });
+  } finally {
+    URL.revokeObjectURL(loaded.url);
+  }
+}
+
+function backoffDelay(attempts) {
+  var n = Math.max(1, attempts);
+  var exp = photoNotesConfig.backoffBaseMs * Math.pow(2, n - 1);
+  if (exp > photoNotesConfig.backoffCapMs) exp = photoNotesConfig.backoffCapMs;
+  var jitter = (Math.random() * 0.4 - 0.2) * exp;
+  var delay = Math.round(exp + jitter);
+  if (delay < 250) delay = 250;
+  if (delay > photoNotesConfig.backoffCapMs) delay = photoNotesConfig.backoffCapMs;
+  return delay;
+}
+
+function requestPersistentStorage() {
+  try {
+    if (navigator.storage && navigator.storage.persist) {
+      navigator.storage.persist().catch(function () {});
+    }
+  } catch (err) {}
+}
+
+function openDb() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise(function (resolve, reject) {
+    var req = indexedDB.open(photoNotesConfig.dbName, 1);
+    req.onupgradeneeded = function () {
+      var db = req.result;
+      if (!db.objectStoreNames.contains(photoNotesConfig.storeName)) {
+        db.createObjectStore(photoNotesConfig.storeName, { keyPath: 'id' });
+      }
     };
-    reader.readAsDataURL(file);
+    req.onsuccess = function () { resolve(req.result); };
+    req.onerror = function () { dbPromise = null; reject(req.error); };
+    req.onblocked = function () { dbPromise = null; reject(new Error('IndexedDB blocked')); };
+  });
+  return dbPromise;
+}
+
+function getAllItems() {
+  return openDb().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(photoNotesConfig.storeName, 'readonly');
+      var req = tx.objectStore(photoNotesConfig.storeName).getAll();
+      req.onsuccess = function () { resolve(req.result || []); };
+      req.onerror = function () { reject(req.error); };
+    });
+  });
+}
+
+function idbPut(item) {
+  return openDb().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(photoNotesConfig.storeName, 'readwrite');
+      tx.objectStore(photoNotesConfig.storeName).put(item);
+      tx.oncomplete = function () { resolve(); };
+      tx.onerror = function () { reject(tx.error); };
+      tx.onabort = function () { reject(tx.error || new Error('IndexedDB aborted')); };
+    });
+  });
+}
+
+function idbDelete(id) {
+  return openDb().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(photoNotesConfig.storeName, 'readwrite');
+      tx.objectStore(photoNotesConfig.storeName).delete(id);
+      tx.oncomplete = function () { resolve(); };
+      tx.onerror = function () { reject(tx.error); };
+      tx.onabort = function () { reject(tx.error || new Error('IndexedDB aborted')); };
+    });
+  });
+}
+
+function countQueueItems() {
+  return getAllItems().then(function (items) {
+    pendingCount = items.length;
+    renderQueueBadge();
+    return items.length;
+  });
+}
+
+function renderQueueBadge() {
+  var el = document.getElementById('queueBadge');
+  if (!el) return;
+  var n = pendingCount;
+  var stateName = badgeState;
+  if (!navigator.onLine && n > 0) stateName = 'waiting-signal';
+  if (n === 0) stateName = 'idle';
+  el.dataset.state = stateName;
+  if (stateName === 'uploading') el.textContent = 'Uploading · ' + n;
+  else if (stateName === 'waiting-signal') el.textContent = 'Waiting for signal · ' + n;
+  else if (stateName === 'waiting-retry') el.textContent = 'Waiting · ' + n;
+  else el.textContent = n + ' waiting';
+}
+
+function photoFilename(property, category, id) {
+  var slug = function (value) {
+    return String(value || 'photo').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 40);
+  };
+  return slug(property) + '_' + slug(category || 'photo') + '_' + String(id).slice(0, 8) + '.jpg';
+}
+
+async function captureCurrentItem(category, note) {
+  var blob = null;
+  if (state.currentPhotoFile) blob = await resizePhoto(state.currentPhotoFile);
+  var localUrl = blob ? URL.createObjectURL(blob) : '';
+  await enqueuePhotoRow({ category: category, note: note, blob: blob });
+  state.currentPhotoFile = null;
+  state.currentItemLocalUrl = null;
+  var input = document.getElementById('photoFileInput');
+  if (input) input.value = '';
+  return localUrl;
+}
+
+function enqueuePhotoRow(fields) {
+  var id = newClientId();
+  return enqueueItem({
+    id: id,
+    kind: 'photoRow',
+    blob: fields.blob || null,
+    filename: photoFilename(state.property, fields.category, id),
+    row: {
+      property: state.property,
+      unit: state.unit,
+      inspector: auth.name,
+      category: fields.category || '',
+      note: fields.note || '',
+      location: state.location,
+      date: new Date().toLocaleDateString(),
+    },
+    createdAt: Date.now(),
+    seq: ++enqueueSeq,
+    attempts: 0,
+    nextAttemptAt: 0,
+    lastError: '',
+    uploadedViewUrl: '',
+  });
+}
+
+async function enqueueItem(item) {
+  await idbPut(item);
+  requestPersistentStorage();
+  var items = await getAllItems();
+  pendingCount = items.length;
+  if (!navigator.onLine && pendingCount > 0) badgeState = 'waiting-signal';
+  renderQueueBadge();
+  kickQueue();
+  return item;
+}
+
+function kickQueue(opts) {
+  if (opts && opts.force) pendingForce = true;
+  if (workerRunning) {
+    kickAgain = true;
+    return;
+  }
+  workerRunning = true;
+  runWorker().then(function () {}, function (err) {
+    console.warn('PhotoNotes queue', err);
+    scheduleQueueRetry(backoffDelay(1));
+  }).then(function () {
+    workerRunning = false;
+    if (kickAgain || pendingForce) {
+      kickAgain = false;
+      kickQueue();
+    }
+  });
+}
+
+async function runWorker() {
+  await withUploadLock(async function () {
+    if (pendingForce) {
+      pendingForce = false;
+      await clearBackoff();
+    }
+    await processReadyItems();
+  });
+}
+
+function withUploadLock(fn) {
+  if (navigator.locks && typeof navigator.locks.request === 'function') {
+    return navigator.locks.request(photoNotesConfig.lockName, { mode: 'exclusive' }, function () {
+      return fn();
+    });
+  }
+  return fn();
+}
+
+async function clearBackoff() {
+  var items = await getAllItems();
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].nextAttemptAt > Date.now()) {
+      items[i].nextAttemptAt = 0;
+      await idbPut(items[i]);
+    }
+  }
+}
+
+function compareQueueItems(a, b) {
+  if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+  return (a.seq || 0) - (b.seq || 0);
+}
+
+async function processReadyItems() {
+  while (true) {
+    var items = await getAllItems();
+    items.sort(compareQueueItems);
+    pendingCount = items.length;
+    if (!items.length) {
+      badgeState = 'idle';
+      renderQueueBadge();
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      return;
+    }
+    if (!navigator.onLine) {
+      badgeState = 'waiting-signal';
+      renderQueueBadge();
+      return;
+    }
+    var item = items[0];
+    var wait = (item.nextAttemptAt || 0) - Date.now();
+    if (wait > 0) {
+      badgeState = 'waiting-retry';
+      renderQueueBadge();
+      scheduleQueueRetry(wait);
+      return;
+    }
+    badgeState = 'uploading';
+    renderQueueBadge();
+    var outcome = await sendWithTimeout(item);
+    if (outcome.ok) {
+      await idbDelete(item.id);
+      continue;
+    }
+    item.attempts = (item.attempts || 0) + 1;
+    item.lastError = outcome.error || 'failed';
+    if (outcome.uploadedViewUrl) item.uploadedViewUrl = outcome.uploadedViewUrl;
+    item.nextAttemptAt = Date.now() + backoffDelay(item.attempts);
+    await idbPut(item);
+    badgeState = 'waiting-retry';
+    pendingCount = items.length;
+    renderQueueBadge();
+    scheduleQueueRetry(item.nextAttemptAt - Date.now());
+    return;
+  }
+}
+
+function scheduleQueueRetry(ms) {
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = setTimeout(function () {
+    retryTimer = null;
+    kickQueue();
+  }, Math.max(50, ms));
+}
+
+async function sendWithTimeout(item) {
+  var ctrl = new AbortController();
+  var timer = setTimeout(function () { ctrl.abort(); }, photoNotesConfig.timeoutMs);
+  try {
+    return await deliverItem(item, ctrl.signal);
+  } catch (err) {
+    var aborted = err && err.name === 'AbortError';
+    return {
+      ok: false,
+      error: aborted ? 'timeout' : String(err && err.message ? err.message : err),
+      uploadedViewUrl: item.uploadedViewUrl || '',
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isUnknownAction(result, raw) {
+  var msg = ((result && result.error) || '') + '\n' + (raw || '');
+  return /unknown action|unsupported action|action not supported|unrecognized action/i.test(msg);
+}
+
+async function postJson(payload, signal) {
+  var url = getSheetsUrl();
+  if (!url) return { success: false, error: 'No Sheets URL' };
+  var resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify(payload),
+    signal: signal,
+  });
+  var raw = await resp.text();
+  var result = null;
+  try { result = JSON.parse(raw); } catch (err) {}
+  var unknownAction = isUnknownAction(result, raw);
+  if (result && result.success === true) {
+    return {
+      success: true,
+      viewUrl: result.viewUrl || '',
+      fileId: result.fileId || '',
+      result: result,
+    };
+  }
+  return {
+    success: false,
+    error: (result && result.error) ? String(result.error) : ('HTTP ' + resp.status),
+    status: resp.status,
+    unknownAction: unknownAction,
+  };
+}
+
+async function deliverItem(item, signal) {
+  if (item.kind === 'followUp') {
+    var follow = await postJson({
+      action: 'submitFollowUp',
+      id: item.id,
+      row: item.row,
+    }, signal);
+    if (!follow.success) return { ok: false, error: follow.error || 'follow-up failed' };
+    return { ok: true };
+  }
+
+  if (!legacyUpload) {
+    var combined = await postJson(await buildSubmitPhotoRow(item), signal);
+    if (combined.success) return { ok: true };
+    if (combined.unknownAction) legacyUpload = true;
+    else {
+      return {
+        ok: false,
+        error: combined.error || 'submitPhotoRow failed',
+        uploadedViewUrl: item.uploadedViewUrl || '',
+      };
+    }
+  }
+
+  var photoUrl = item.uploadedViewUrl || '';
+  if (item.blob && !photoUrl) {
+    var base64 = await blobToBase64(item.blob);
+    var uploaded = await postJson({
+      action: 'uploadPhoto',
+      unit: item.row.property,
+      subunit: item.row.unit,
+      category: item.row.category || 'photo',
+      filename: item.filename,
+      mimeType: 'image/jpeg',
+      base64: base64,
+      clientId: item.id,
+    }, signal);
+    if (!uploaded.success) return { ok: false, error: uploaded.error || 'uploadPhoto failed' };
+    photoUrl = uploaded.viewUrl || '';
+    item.uploadedViewUrl = photoUrl;
+    await idbPut(item);
+  }
+  var row = {
+    property: item.row.property,
+    unit: item.row.unit,
+    inspector: item.row.inspector,
+    category: item.row.category,
+    note: item.row.note,
+    photoUrl: photoUrl,
+    location: item.row.location,
+    date: item.row.date,
+  };
+  var saved = await postJson({ action: 'submitRows', rows: [row], clientId: item.id }, signal);
+  if (!saved.success) {
+    return { ok: false, error: saved.error || 'submitRows failed', uploadedViewUrl: photoUrl };
+  }
+  return { ok: true };
+}
+
+async function buildSubmitPhotoRow(item) {
+  var body = {
+    action: 'submitPhotoRow',
+    id: item.id,
+    filename: item.filename,
+    mimeType: item.blob ? 'image/jpeg' : '',
+    base64: '',
+    row: {
+      property: item.row.property,
+      unit: item.row.unit,
+      inspector: item.row.inspector,
+      category: item.row.category,
+      note: item.row.note,
+      photoUrl: item.uploadedViewUrl || '',
+      location: item.row.location,
+      date: item.row.date,
+    },
+  };
+  if (item.blob) body.base64 = await blobToBase64(item.blob);
+  return body;
+}
+
+// ─── Utility ──────────────────────────────────────────────────────────────────
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      const comma = result.indexOf(',');
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error('Read failed'));
+    reader.readAsDataURL(blob);
   });
 }
 
@@ -1101,6 +1722,25 @@ auth.updateHeader();
 
 // Init — baked-in default URL (used if nothing saved in localStorage)
 updateSheetStatus(getSheetsUrl());
+
+requestPersistentStorage();
+window.addEventListener('online', function () { kickQueue({ force: true }); });
+window.addEventListener('offline', function () {
+  if (pendingCount > 0) badgeState = 'waiting-signal';
+  renderQueueBadge();
+});
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'visible') kickQueue();
+});
+window.addEventListener('pageshow', function () { kickQueue(); });
+window.addEventListener('load', function () { kickQueue(); });
+window.addEventListener('beforeunload', function (e) {
+  if (pendingCount > 0) {
+    e.preventDefault();
+    e.returnValue = 'Photos are still waiting to upload on this phone.';
+  }
+});
+kickQueue();
 </script>
 </body>
 </html>
