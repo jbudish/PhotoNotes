@@ -18,6 +18,10 @@ The Apps Script source is `google-apps-script.js`, matching the live web app (Ve
 
 The phone keeps posting to the existing `/exec` URL. If a deployment answers `Unknown action` for `submitPhotoRow`, the queue falls back to `uploadPhoto` then `submitRows` and keeps retrying.
 
+End Session, after saving any open note, waits for this phone’s photos to upload and then sends `endSession` with those photo ids only. The script matches the typed property to a workbook in the Property Campaigns folder. A confident match moves that session’s rows onto the workbook’s Photonotes tab and moves the photos into that property’s Drive folder when one exists. Anything ambiguous stays on the master PhotoNotes tab. The phone shows the script’s message. Offline, the filing request waits on the phone and sends later.
+
+Redeploy the existing web app (do not create a new deployment) after replacing the script. Scopes are the ones photo upload already uses: `https://www.googleapis.com/auth/spreadsheets` and `https://www.googleapis.com/auth/drive`.
+
 ## What Jeff does not need to change
 
 The page, the Settings screen, and the saved web app URL stay as they are. End Session does not delete photos still waiting on the phone. With an empty note and no photo, End Session and New Unit do not add a row.

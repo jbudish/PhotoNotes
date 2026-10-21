@@ -570,6 +570,7 @@ const state = {
   currentPhotoFile: null,
   currentItemLocalUrl: null,
   sessionLog: [],
+  sessionPhotoIds: [],
   _prevScreen: 'screen-session',
 };
 
@@ -723,11 +724,50 @@ function goBack() {
 }
 
 // ─── Session ──────────────────────────────────────────────────────────────────
+function readStoredJson(key) {
+  try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (err) { return null; }
+}
+
+function writeStoredJson(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (err) {}
+}
+
+function samePropertyName(a, b) {
+  return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+}
+
+function persistOpenSession() {
+  writeStoredJson('pnOpenSession', {
+    property: state.property,
+    location: state.location,
+    inspector: auth.name,
+    ids: state.sessionPhotoIds.slice(),
+  });
+}
+
+function rememberSessionPhoto(id) {
+  if (!id || state.sessionPhotoIds.indexOf(id) !== -1) return;
+  state.sessionPhotoIds.push(id);
+  persistOpenSession();
+}
+
 function startSession() {
   const prop = document.getElementById('inputProperty').value.trim();
   if (!prop) { document.getElementById('inputProperty').focus(); return; }
+  const open = readStoredJson('pnOpenSession');
+  if (open && Array.isArray(open.ids) && open.ids.length && !samePropertyName(open.property, prop)) {
+    const stash = readStoredJson('pnUnfiledSessions') || [];
+    stash.push(open);
+    writeStoredJson('pnUnfiledSessions', stash);
+    state.sessionPhotoIds = [];
+  } else if (open && Array.isArray(open.ids) && samePropertyName(open.property, prop)) {
+    state.sessionPhotoIds = open.ids.slice();
+  } else {
+    state.sessionPhotoIds = [];
+  }
   state.property = prop;
   state.location = document.getElementById('inputLocation').value.trim();
+  persistOpenSession();
   document.getElementById('inputUnit').value = '';
   showScreen('screen-unit');
 }
@@ -806,16 +846,39 @@ async function endSession() {
   if (capturing) return;
   capturing = true;
   let proceed = false;
+  let filingId = '';
   try {
     // Queue the open entry first. End Session never deletes the queue.
     const result = await submitCurrentEntry();
     proceed = result === 'empty' || result === 'saved';
     if (!proceed) return;
-    const left = await countQueueItems();
-    if (left > 0) {
-      alert(left + (left === 1 ? ' item is' : ' items are') + ' still saved on this phone and waiting to upload. They will not be discarded. Reopen PhotoNotes when you have a signal, and do not clear this site’s data.');
+    const sessions = sessionsToFile();
+    if (!sessions.length) {
+      alert('No photos in this session.');
+    } else {
+      showSendToast('sending', 'Filing session...');
+      const queued = [];
+      for (let i = 0; i < sessions.length; i++) {
+        queued.push(await enqueueEndSession(sessions[i]));
+      }
+      clearFiledSessions(sessions);
+      filingId = queued[queued.length - 1].id;
+      if (!navigator.onLine) {
+        alert('You\'re offline. This session is saved on this phone and will be filed when you have a signal. Do not clear this site\'s data.');
+      } else {
+        endSessionWaiters[filingId] = true;
+        const filed = await waitForEndSession(filingId, 90000);
+        delete endSessionWaiters[filingId];
+        if (filed && filed.message) alert(filed.message);
+        else alert('Still uploading. This session will be filed when the photos finish, and a message will appear then. Do not clear this site\'s data.');
+      }
     }
+  } catch (err) {
+    showSendToast('failed', '✗ Could not save on this phone — try again');
+    proceed = false;
+    return;
   } finally {
+    if (filingId) delete endSessionWaiters[filingId];
     capturing = false;
   }
   if (!proceed) return;
@@ -832,6 +895,87 @@ async function endSession() {
   document.getElementById('sessionLogWrap').style.display = 'none';
   document.getElementById('inputLocation').value = '';
   showScreen('screen-session');
+}
+
+function sessionsToFile() {
+  const sessions = [];
+  const stash = readStoredJson('pnUnfiledSessions') || [];
+  for (let i = 0; i < stash.length; i++) {
+    if (stash[i] && Array.isArray(stash[i].ids) && stash[i].ids.length) sessions.push(stash[i]);
+  }
+  if (state.sessionPhotoIds.length) {
+    sessions.push({
+      property: state.property,
+      location: state.location,
+      inspector: auth.name,
+      ids: state.sessionPhotoIds.slice(),
+    });
+  }
+  return sessions;
+}
+
+function clearFiledSessions(sessions) {
+  const filed = {};
+  sessions.forEach(function (session) {
+    (session.ids || []).forEach(function (id) { filed[id] = true; });
+  });
+  state.sessionPhotoIds = state.sessionPhotoIds.filter(function (id) { return !filed[id]; });
+  try { localStorage.removeItem('pnOpenSession'); } catch (err) {}
+  try { localStorage.removeItem('pnUnfiledSessions'); } catch (err) {}
+}
+
+async function enqueueEndSession(session) {
+  const items = await getAllItems();
+  let latestPhoto = 0;
+  items.forEach(function (item) {
+    if (item.kind === 'photoRow' && session.ids.indexOf(item.id) !== -1) {
+      latestPhoto = Math.max(latestPhoto, item.createdAt || 0);
+    }
+  });
+  // After this session's photos, but not behind some other property's upload
+  // when those photos are already done.
+  let createdAt = latestPhoto ? latestPhoto + 1 : Date.now();
+  if (!latestPhoto && items.length) {
+    let min = items[0].createdAt || Date.now();
+    items.forEach(function (item) { if ((item.createdAt || 0) < min) min = item.createdAt; });
+    createdAt = min - 1;
+  }
+  return enqueueItem({
+    id: newClientId(),
+    kind: 'endSession',
+    blob: null,
+    filename: '',
+    row: {
+      property: session.property || '',
+      location: session.location || '',
+      inspector: session.inspector || auth.name,
+      ids: session.ids.slice(),
+    },
+    createdAt: createdAt,
+    seq: ++enqueueSeq,
+    attempts: 0,
+    nextAttemptAt: 0,
+    lastError: '',
+    uploadedViewUrl: '',
+  });
+}
+
+function waitForEndSession(id, ms) {
+  const start = Date.now();
+  return new Promise(function (resolve) {
+    (function poll() {
+      if (endSessionResults[id]) return resolve(endSessionResults[id]);
+      getAllItems().then(function (items) {
+        const still = items.some(function (item) { return item.id === id; });
+        if (!still) return resolve(endSessionResults[id] || null);
+        if (Date.now() - start >= ms) return resolve(endSessionResults[id] || null);
+        setTimeout(poll, 300);
+      }, function () {
+        if (Date.now() - start >= ms) resolve(null);
+        else setTimeout(poll, 300);
+      });
+    })();
+  });
 }
 
 // ─── Photo ────────────────────────────────────────────────────────────────────
@@ -1074,6 +1218,8 @@ var photoNotesConfig = {
 
 var capturing = false;
 var toastTimer = null;
+var endSessionResults = {};
+var endSessionWaiters = {};
 var enqueueSeq = 0;
 var pendingCount = 0;
 var badgeState = 'idle';
@@ -1422,7 +1568,8 @@ async function captureCurrentItem(category, note) {
   var blob = null;
   if (state.currentPhotoFile) blob = await resizePhoto(state.currentPhotoFile);
   var localUrl = blob ? URL.createObjectURL(blob) : '';
-  await enqueuePhotoRow({ category: category, note: note, blob: blob });
+  var item = await enqueuePhotoRow({ category: category, note: note, blob: blob });
+  rememberSessionPhoto(item.id);
   state.currentPhotoFile = null;
   state.currentItemLocalUrl = null;
   var input = document.getElementById('photoFileInput');
@@ -1543,12 +1690,31 @@ async function processReadyItems() {
       scheduleQueueRetry(wait);
       return;
     }
+    if (item.kind === 'endSession' && await endSessionWaitingOnPhotos(item)) {
+      var head = await getAllItems();
+      head.sort(compareQueueItems);
+      if (!head.length || head[0].id === item.id) {
+        item.nextAttemptAt = Date.now() + 400;
+        await idbPut(item);
+        scheduleQueueRetry(400);
+        return;
+      }
+      continue;
+    }
     badgeState = 'uploading';
     renderQueueBadge();
     var outcome = await sendWithTimeout(item);
     if (outcome.ok) {
       await idbDelete(item.id);
       continue;
+    }
+    if (outcome.delayMs) {
+      item.nextAttemptAt = Date.now() + outcome.delayMs;
+      await idbPut(item);
+      badgeState = 'waiting-retry';
+      renderQueueBadge();
+      scheduleQueueRetry(outcome.delayMs);
+      return;
     }
     item.attempts = (item.attempts || 0) + 1;
     item.lastError = outcome.error || 'failed';
@@ -1571,9 +1737,37 @@ function scheduleQueueRetry(ms) {
   }, Math.max(50, ms));
 }
 
+async function endSessionWaitingOnPhotos(item) {
+  var ids = (item.row && item.row.ids) || [];
+  var items = await getAllItems();
+  var latest = 0;
+  var waiting = false;
+  for (var i = 0; i < items.length; i++) {
+    var other = items[i];
+    if (other.kind === 'photoRow' && ids.indexOf(other.id) !== -1) {
+      waiting = true;
+      if ((other.createdAt || 0) >= latest) latest = other.createdAt || 0;
+    }
+  }
+  if (!waiting) return false;
+  if ((item.createdAt || 0) <= latest) {
+    item.createdAt = latest + 1;
+    await idbPut(item);
+  }
+  return true;
+}
+
+function finishEndSession(id, message) {
+  if (!id || !message) return;
+  endSessionResults[id] = { message: message };
+  if (endSessionWaiters[id]) return;
+  alert(message);
+}
+
 async function sendWithTimeout(item) {
   var ctrl = new AbortController();
-  var timer = setTimeout(function () { ctrl.abort(); }, photoNotesConfig.timeoutMs);
+  var limit = item.kind === 'endSession' ? 55000 : photoNotesConfig.timeoutMs;
+  var timer = setTimeout(function () { ctrl.abort(); }, limit);
   try {
     return await deliverItem(item, ctrl.signal);
   } catch (err) {
@@ -1623,6 +1817,21 @@ async function postJson(payload, signal) {
 }
 
 async function deliverItem(item, signal) {
+  if (item.kind === 'endSession') {
+    var saved = await postJson({
+      action: 'endSession',
+      id: item.id,
+      property: item.row.property || '',
+      location: item.row.location || '',
+      inspector: item.row.inspector || '',
+      ids: item.row.ids || [],
+    }, signal);
+    if (!saved.success) return { ok: false, error: saved.error || 'endSession failed' };
+    var message = (saved.result && saved.result.message) || 'Session filed.';
+    finishEndSession(item.id, message);
+    return { ok: true };
+  }
+
   if (item.kind === 'followUp') {
     var follow = await postJson({
       action: 'submitFollowUp',
