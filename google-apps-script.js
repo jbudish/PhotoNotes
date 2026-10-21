@@ -35,9 +35,15 @@
  *       was already saved. viewUrl is the existing link when already saved.
  *   endSession        → file THIS phone's photo ids into the matching deal
  *       { id, property, location, inspector, ids: [clientId, ...] }
- *       { success, matched, message }
+ *       Optional, after the inspector picks a workbook:
+ *       { workbookId, folderId }
+ *       { success, matched, message, needsChoice?, candidates? }
+ *       needsChoice lists the top close workbooks and moves nothing.
+ *       A picked workbookId is stored on the hidden PropertyAliases tab.
  *       Only those ids are moved. A retry of the same id returns the same
  *       message and does not copy rows again.
+ *   listCampaignWorkbooks → { success, workbooks: [{ id, name, folderId, folderName }] }
+ *       Every spreadsheet sitting in Property Campaigns, for the phone's search.
  *
  * Unknown actions return { success:false, error:"Unknown action" } so an
  * older copy of the phone page can fall back to uploadPhoto + submitRows.
@@ -96,6 +102,10 @@ var CONFIG = {
   CAMPAIGN_FOLDER_ID: '15nJZofaS0kvAWpoawBACUc9XV5seHiYQ',
   DEAL_TAB_NAME: 'Photonotes',
   DEAL_HEADERS: ['Property', 'Unit', 'Location', 'User', 'Category', 'Notes', 'Photo link', 'Date', 'Time'],
+
+  // Hidden tab on the master sheet. One row per typed property the inspector
+  // confirmed, so the next visit (any phone) skips the prompt.
+  ALIAS_SHEET_NAME: 'PropertyAliases',
 };
 
 // ─── Web app entry ───────────────────────────────────────────────────────────
@@ -117,6 +127,7 @@ function doPost(e) {
     if (action === 'submitFollowUp') return json_(submitFollowUp_(body));
     if (action === 'submitPhotoRow') return json_(submitPhotoRow_(body));
     if (action === 'endSession') return json_(endSession_(body));
+    if (action === 'listCampaignWorkbooks') return json_(listCampaignWorkbooks_());
     return json_({ success: false, error: 'Unknown action' });
   } catch (err) {
     return json_({ success: false, error: String(err && err.message ? err.message : err) });
@@ -288,6 +299,7 @@ function getRowsSheet_() {
     if (name === CONFIG.IDS_SHEET_NAME) continue;
     if (name === CONFIG.FOLLOWUP_SHEET_NAME) continue;
     if (name === CONFIG.CATEGORIES_SHEET_NAME) continue;
+    if (name === CONFIG.ALIAS_SHEET_NAME) continue;
     return sheets[i];
   }
   var created = ss.insertSheet(CONFIG.ROWS_SHEET_NAME || 'Sheet1');
@@ -593,64 +605,113 @@ function sanitizeName_(name, maxLen) {
 }
 
 // ─── End session: file this phone's rows into the deal workbook ─────────────
-// Matching is deliberate and refuses ties. Workbook titles look like
-// "Millie Beneke Manor - MB 9/26". Compared names ignore case, punctuation,
-// and that " - MB m/yy" suffix, and a leading "The ". "Millie" can match
-// "Millie Beneke Manor" when it is the only workbook that fits. Location
-// (the city after the comma, or the last word) breaks a tie against folder
-// names such as Millie_Beneke_Manor_Glencoe. Anything still ambiguous is
-// left on the master PhotoNotes tab.
+// Matching refuses ties. Titles look like "Millie Beneke Manor - MB 9/26".
+// Compared names ignore case, punctuation, a leading "The ", and the
+// " - MB m/yy" suffix. Small spelling errors count (edit distance): "Millie
+// Benneke" and "Milly Beneke" can match "Millie Beneke Manor", and "Twin pins"
+// can match "Twin Pines", when that workbook is the only close one. The city
+// in Location breaks a tie against folder names such as
+// Millie_Beneke_Manor_Glencoe. A weak name can still match when the street
+// number and street name point at one property. Anything else is left on the
+// master PhotoNotes tab and the phone asks the inspector to pick.
 
 function endSession_(body) {
+  var catalog = campaignCatalog_();
   return withLock_(function () {
-    var id = clientId_(body);
-    if (id) {
-      var prior = getIdRecord_(id);
-      if (prior && prior.extra && prior.extra.resultMessage) {
-        return {
-          success: true,
-          alreadySaved: true,
-          matched: !!prior.extra.matched,
-          message: String(prior.extra.resultMessage),
-        };
-      }
-    }
-
-    var ids = normalizeIdList_(body && body.ids);
-    var property = String((body && body.property) || '').trim();
-    var location = String((body && body.location) || '').trim();
-    if (!ids.length) {
-      return finishEndSession_(id, 'No photos in this session.', false);
-    }
-
-    var listed = listCampaignMatches_(property);
-    var picked = pickPropertyMatch_(property, location, listed.workbooks, listed.folders);
-    if (!picked.confident) {
-      return finishEndSession_(id, noMatchMessage_(property, picked.candidates), false);
-    }
-
-    var filed = fileSessionRows_(ids, picked.workbook);
-    var photos = moveSessionPhotos_(filed.fileIds, picked.folder);
-    var message = filingResultMessage_({
-      count: filed.count,
-      missing: filed.missing,
-      workbookName: picked.workbook.name,
-      folderName: photos.folderName,
-      photosLeft: !picked.folder,
-    });
-    return finishEndSession_(id, message, true);
+    return endSessionLocked_(body, catalog);
   });
 }
 
-function finishEndSession_(id, message, matched) {
+function endSessionLocked_(body, catalog) {
+  var id = clientId_(body);
+  if (id) {
+    var prior = getIdRecord_(id);
+    if (prior && prior.extra && prior.extra.resultMessage) {
+      var again = {
+        success: true,
+        alreadySaved: true,
+        matched: !!prior.extra.matched,
+        message: String(prior.extra.resultMessage),
+      };
+      if (prior.extra.needsChoice) {
+        again.needsChoice = true;
+        again.candidates = prior.extra.candidates || [];
+      }
+      return again;
+    }
+  }
+
+  var ids = normalizeIdList_(body && body.ids);
+  var property = String((body && body.property) || '').trim();
+  var location = String((body && body.location) || '').trim();
+  if (!ids.length) {
+    return finishEndSession_(id, 'No photos in this session.', false);
+  }
+
+  if (body && body.workbookId) {
+    return fileChosenWorkbook_(id, ids, property, location, body, catalog);
+  }
+
+  var alias = aliasForText_(property);
+  if (alias) {
+    var learned = workbookFromCatalog_(catalog, alias.workbookId, alias.folderId);
+    if (learned) return fileMatchedSession_(id, ids, learned);
+  }
+
+  var hints = aliasAddressHints_(location).concat(masterAddressHints_(location, catalog));
+  var picked = pickPropertyMatch_(property, location, catalog.workbooks, catalog.folders, hints);
+  if (!picked.confident) {
+    return finishEndSession_(id, noMatchMessage_(property, picked.candidates), false, {
+      needsChoice: true,
+      candidates: picked.choices || [],
+    });
+  }
+  return fileMatchedSession_(id, ids, picked);
+}
+
+function fileChosenWorkbook_(id, ids, property, location, body, catalog) {
+  var picked = workbookFromCatalog_(catalog, body.workbookId, body.folderId);
+  if (!picked) {
+    return finishEndSession_(id, 'That workbook is not in Property Campaigns. Photos left in PhotoNotes', false);
+  }
+  saveAlias_(property, location, picked);
+  return fileMatchedSession_(id, ids, picked);
+}
+
+function fileMatchedSession_(id, ids, picked) {
+  var filed = fileSessionRows_(ids, picked.workbook);
+  var photos = moveSessionPhotos_(filed.fileIds, picked.folder);
+  var message = filingResultMessage_({
+    count: filed.count,
+    missing: filed.missing,
+    workbookName: picked.workbook.name,
+    folderName: photos.folderName,
+    photosLeft: !picked.folder,
+  });
+  return finishEndSession_(id, message, true);
+}
+
+function finishEndSession_(id, message, matched, more) {
+  more = more || {};
+  var extra = {
+    resultMessage: message,
+    matched: !!matched,
+    needsChoice: !!more.needsChoice,
+  };
+  if (more.candidates) extra.candidates = more.candidates;
   if (id) {
     rememberId_(id, {
       rowSaved: true,
       kind: 'endSession',
-      extra: { resultMessage: message, matched: !!matched },
+      extra: extra,
     });
   }
-  return { success: true, matched: !!matched, message: message };
+  var out = { success: true, matched: !!matched, message: message };
+  if (more.needsChoice) {
+    out.needsChoice = true;
+    out.candidates = more.candidates || [];
+  }
+  return out;
 }
 
 function normalizeIdList_(ids) {
@@ -689,53 +750,6 @@ function filingResultMessage_(info) {
     msg += '. ' + info.missing + (info.missing === 1 ? ' was' : ' were') + ' not on the PhotoNotes tab';
   }
   return msg;
-}
-
-function listCampaignMatches_(property) {
-  var root = DriveApp.getFolderById(CONFIG.CAMPAIGN_FOLDER_ID);
-  var query = normalizePropertyName_(property);
-  var tokens = query ? query.split(' ') : [];
-  var token = '';
-  for (var i = 0; i < tokens.length; i++) {
-    if (tokens[i].length > token.length) token = tokens[i];
-  }
-  if (token.length < 3) return { workbooks: [], folders: [] };
-  var escaped = token.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-  var workbooks = [];
-  var seenFiles = {};
-  var files = root.searchFiles(
-    "mimeType = '" + MimeType.GOOGLE_SHEETS + "' and title contains '" + escaped + "'"
-  );
-  var fileCount = 0;
-  while (files.hasNext() && fileCount < 40) {
-    var file = files.next();
-    fileCount++;
-    if (seenFiles[file.getId()]) continue;
-    if (!isDirectChild_(file, root.getId())) continue;
-    seenFiles[file.getId()] = true;
-    workbooks.push({ id: file.getId(), name: file.getName() });
-  }
-  var folders = [];
-  var seenFolders = {};
-  var foundFolders = root.searchFolders("title contains '" + escaped + "'");
-  var folderCount = 0;
-  while (foundFolders.hasNext() && folderCount < 40) {
-    var folder = foundFolders.next();
-    folderCount++;
-    if (seenFolders[folder.getId()]) continue;
-    if (!isDirectChild_(folder, root.getId())) continue;
-    seenFolders[folder.getId()] = true;
-    folders.push({ id: folder.getId(), name: folder.getName() });
-  }
-  return { workbooks: workbooks, folders: folders };
-}
-
-function isDirectChild_(item, parentId) {
-  var parents = item.getParents();
-  while (parents.hasNext()) {
-    if (parents.next().getId() === parentId) return true;
-  }
-  return false;
 }
 
 function stripCampaignSuffix_(text) {
@@ -781,14 +795,85 @@ function scorePropertyName_(query, candidate) {
   if (query === candidate) return 100;
   var q = query.split(' ');
   var c = candidate.split(' ');
-  if (!tokensInOrder_(q, c)) return 0;
-  if (q.length === 1) {
-    if (c.length === 1) return 100;
-    if (c[0] === q[0]) return 88;
-    return q[0].length >= 4 ? 80 : 68;
+  if (tokensInOrder_(q, c)) {
+    if (q.length === 1) {
+      if (c.length === 1) return 100;
+      if (c[0] === q[0]) return 88;
+      return q[0].length >= 4 ? 80 : 68;
+    }
+    if (candidate.indexOf(query + ' ') === 0) return 92;
+    return 84;
   }
-  if (candidate.indexOf(query + ' ') === 0) return 92;
-  return 84;
+  return fuzzyNameScore_(q, c);
+}
+
+function editDistance_(a, b) {
+  if (a === b) return 0;
+  var n = a.length;
+  var m = b.length;
+  if (!n) return m;
+  if (!m) return n;
+  if (Math.abs(n - m) > 2) return 3;
+  var dp = [];
+  var i, j;
+  for (i = 0; i <= n; i++) {
+    dp[i] = [];
+    dp[i][0] = i;
+  }
+  for (j = 0; j <= m; j++) dp[0][j] = j;
+  for (i = 1; i <= n; i++) {
+    var rowMin = dp[i][0];
+    for (j = 1; j <= m; j++) {
+      var cost = a.charAt(i - 1) === b.charAt(j - 1) ? 0 : 1;
+      var val = dp[i - 1][j] + 1;
+      if (dp[i][j - 1] + 1 < val) val = dp[i][j - 1] + 1;
+      if (dp[i - 1][j - 1] + cost < val) val = dp[i - 1][j - 1] + cost;
+      if (i > 1 && j > 1 &&
+          a.charAt(i - 1) === b.charAt(j - 2) &&
+          a.charAt(i - 2) === b.charAt(j - 1) &&
+          dp[i - 2][j - 2] + 1 < val) {
+        val = dp[i - 2][j - 2] + 1;
+      }
+      dp[i][j] = val;
+      if (val < rowMin) rowMin = val;
+    }
+    if (rowMin > 2) return 3;
+  }
+  return dp[n][m];
+}
+
+function tokenDistance_(a, b) {
+  if (!a || !b || a === b) return a === b ? 0 : 99;
+  if (Math.abs(a.length - b.length) > 2) return 99;
+  var dist = editDistance_(a, b);
+  var minLen = a.length < b.length ? a.length : b.length;
+  if (dist === 1 && minLen >= 4 && a.charAt(0) === b.charAt(0)) return 1;
+  if (dist === 2 && minLen >= 5 && a.charAt(0) === b.charAt(0)) return 2;
+  return 99;
+}
+
+function fuzzyNameScore_(q, c) {
+  if (!q.length || !c.length) return 0;
+  var ci = 0;
+  var dist = 0;
+  for (var qi = 0; qi < q.length; qi++) {
+    var found = -1;
+    var best = 99;
+    for (var j = ci; j < c.length; j++) {
+      var step = q[qi] === c[j] ? 0 : tokenDistance_(q[qi], c[j]);
+      if (step < best) {
+        best = step;
+        found = j;
+        if (step === 0) break;
+      }
+    }
+    if (best > 2) return 0;
+    dist += best;
+    ci = found + 1;
+  }
+  if (!dist || dist > 3) return 0;
+  if (q.length === 1) return 78;
+  return 94 - dist * 4;
 }
 
 function folderMatchesWorkbook_(folderNorm, workbookNorm) {
@@ -798,59 +883,155 @@ function folderMatchesWorkbook_(folderNorm, workbookNorm) {
   return tokensInOrder_(workbookNorm.split(' '), folderNorm.split(' '));
 }
 
-function pickPropertyMatch_(property, location, workbooks, folders) {
+var STREET_WORDS_ = {
+  ave: 1, avenue: 1, st: 1, street: 1, rd: 1, road: 1, dr: 1, drive: 1,
+  ln: 1, lane: 1, blvd: 1, boulevard: 1, ct: 1, court: 1, way: 1, pl: 1, place: 1,
+  n: 1, s: 1, e: 1, w: 1, ne: 1, nw: 1, se: 1, sw: 1,
+  north: 1, south: 1, east: 1, west: 1,
+};
+
+function parseAddress_(location) {
+  var city = cityFromLocation_(location);
+  var head = normalizePropertyName_(String(location || '').split(',')[0] || '');
+  var tokens = head ? head.split(' ') : [];
+  var number = '';
+  var street = [];
+  for (var i = 0; i < tokens.length; i++) {
+    if (!number && /^\d+[a-z]?$/.test(tokens[i])) {
+      number = tokens[i].replace(/[a-z]/g, '');
+      continue;
+    }
+    if (STREET_WORDS_[tokens[i]]) continue;
+    if (tokens[i].length >= 3) street.push(tokens[i]);
+  }
+  return { number: number, street: street, city: city };
+}
+
+function addressKey_(addr) {
+  if (!addr || !addr.number || !addr.street || !addr.street.length) return '';
+  return addr.number + ' ' + addr.street.join(' ');
+}
+
+function tokenInList_(token, list) {
+  if (!token) return false;
+  if (list.indexOf(token) !== -1) return true;
+  if (token.length < 5) return false;
+  for (var i = 0; i < list.length; i++) {
+    if (tokenDistance_(token, list[i]) <= 1) return true;
+  }
+  return false;
+}
+
+function addressMatchScore_(addr, tokens, hinted) {
+  if (hinted) return 80;
+  if (!addr) return 0;
+  var score = 0;
+  if (addr.number && tokens.indexOf(addr.number) !== -1) score += 50;
+  var need = addr.street ? addr.street.length : 0;
+  var hits = 0;
+  for (var i = 0; need && i < need; i++) {
+    if (tokenInList_(addr.street[i], tokens)) hits++;
+  }
+  if (need && hits === need) score += 30;
+  if (addr.city && tokens.indexOf(addr.city) !== -1) score += 20;
+  return score;
+}
+
+function pickPropertyMatch_(property, location, workbooks, folders, addressIndex) {
   var query = normalizePropertyName_(property);
   var qTokens = query ? query.split(' ').filter(Boolean) : [];
   var longEnough = false;
   for (var t = 0; t < qTokens.length; t++) {
     if (qTokens[t].length >= 3) longEnough = true;
   }
-  if (!query || !longEnough) {
-    return { confident: false, candidates: [], workbook: null, folder: null };
+  var addr = parseAddress_(location);
+  var city = addr.city;
+  var hints = {};
+  var index = addressIndex || [];
+  var wantedKey = addressKey_(addr);
+  for (var h = 0; h < index.length; h++) {
+    if (!index[h] || !index[h].workbookId) continue;
+    if (wantedKey && addressKey_(index[h]) === wantedKey) hints[index[h].workbookId] = true;
   }
-  var city = cityFromLocation_(location);
-  var scored = [];
+  var rows = [];
   for (var i = 0; i < workbooks.length; i++) {
     var wb = workbooks[i];
     var nameNorm = normalizePropertyName_(wb.name);
-    var base = scorePropertyName_(query, nameNorm);
-    if (base < 70) continue;
-    var linked = [];
-    for (var f = 0; f < folders.length; f++) {
-      if (folderMatchesWorkbook_(normalizePropertyName_(folders[f].name), nameNorm)) {
-        linked.push(folders[f]);
-      }
+    var base = longEnough ? scorePropertyName_(query, nameNorm) : 0;
+    var linked = foldersForWorkbook_(wb, folders);
+    var blob = nameNorm ? nameNorm.split(' ') : [];
+    for (var f = 0; f < linked.length; f++) {
+      var folderTokens = normalizePropertyName_(linked[f].name).split(' ');
+      for (var ft = 0; ft < folderTokens.length; ft++) blob.push(folderTokens[ft]);
     }
-    var cityHit = false;
-    if (city) {
-      if (nameNorm.split(' ').indexOf(city) !== -1) cityHit = true;
-      for (var c = 0; c < linked.length; c++) {
-        if (normalizePropertyName_(linked[c].name).split(' ').indexOf(city) !== -1) cityHit = true;
-      }
-    }
-    scored.push({
+    var cityHit = !!(city && blob.indexOf(city) !== -1);
+    var addrScore = addressMatchScore_(addr, blob, !!hints[wb.id]);
+    if (base < 60 && addrScore < 50 && !cityHit) continue;
+    rows.push({
       wb: wb,
       base: base,
-      score: base + (cityHit ? 20 : 0),
+      score: base + (base >= 70 && cityHit ? 20 : 0),
+      addrScore: addrScore,
+      cityHit: cityHit,
       linked: linked,
+      rank: base + (base >= 70 && cityHit ? 20 : 0) + (addrScore >= 80 ? 40 : 0) + (cityHit ? 5 : 0),
     });
   }
-  scored.sort(function (a, b) { return b.score - a.score || b.base - a.base; });
-  var candidates = [];
-  for (var s = 0; s < scored.length && s < 5; s++) candidates.push(scored[s].wb.name);
-  if (!scored.length) {
-    return { confident: false, candidates: [], workbook: null, folder: null };
+  rows.sort(function (a, b) {
+    return b.rank - a.rank || b.score - a.score || b.base - a.base;
+  });
+  var nameRows = [];
+  for (var n = 0; n < rows.length; n++) {
+    if (rows[n].base >= 70) nameRows.push(rows[n]);
   }
-  var best = scored[0];
-  var second = scored.length > 1 ? scored[1] : null;
-  var gap = second ? best.score - second.score : 100;
-  var confident = best.score >= 80 && (!second || gap >= 12);
-  if (best.base === 100 && (!second || second.base < 100)) confident = true;
+  nameRows.sort(function (a, b) { return b.score - a.score || b.base - a.base; });
+  var best = nameRows.length ? nameRows[0] : null;
+  var second = nameRows.length > 1 ? nameRows[1] : null;
+  var gap = best && second ? best.score - second.score : 100;
+  var confident = !!(best && best.score >= 80 && (!second || gap >= 12));
+  if (best && best.base === 100 && (!second || second.base < 100)) confident = true;
+
+  if (!confident) {
+    var addrRows = [];
+    for (var a = 0; a < rows.length; a++) {
+      if (rows[a].addrScore >= 80) addrRows.push(rows[a]);
+    }
+    addrRows.sort(function (a, b) { return b.addrScore - a.addrScore; });
+    var addrUnique = addrRows.length &&
+      (addrRows.length === 1 || addrRows[0].addrScore - addrRows[1].addrScore >= 15);
+    if (addrUnique) {
+      var addrBest = addrRows[0];
+      var nameWeak = !best || best.score < 80;
+      var breaksTie = !!(best && second && gap < 12 &&
+        (addrBest.wb.id === best.wb.id || addrBest.wb.id === second.wb.id));
+      if (nameWeak || breaksTie) {
+        best = addrBest;
+        confident = true;
+      }
+    }
+  }
+
+  var choices = [];
+  var choiceNames = [];
+  for (var s = 0; s < rows.length && choices.length < 5; s++) {
+    var choiceFolder = chooseCampaignFolder_(rows[s], city);
+    choices.push({
+      workbookId: rows[s].wb.id,
+      name: rows[s].wb.name,
+      folderId: choiceFolder ? choiceFolder.id : '',
+      folderName: choiceFolder ? choiceFolder.name : '',
+    });
+    choiceNames.push(rows[s].wb.name);
+  }
+  if (!confident) {
+    return { confident: false, candidates: choiceNames, choices: choices, workbook: null, folder: null };
+  }
   return {
-    confident: confident,
-    workbook: confident ? best.wb : null,
-    folder: confident ? chooseCampaignFolder_(best, city) : null,
-    candidates: confident ? [] : candidates,
+    confident: true,
+    workbook: best.wb,
+    folder: chooseCampaignFolder_(best, city),
+    candidates: [],
+    choices: [],
   };
 }
 
@@ -864,6 +1045,257 @@ function chooseCampaignFolder_(best, city) {
     if (normalizePropertyName_(linked[i].name).split(' ').indexOf(city) !== -1) hits.push(linked[i]);
   }
   return hits.length === 1 ? hits[0] : null;
+}
+
+function foldersForWorkbook_(workbook, folders) {
+  var nameNorm = normalizePropertyName_(workbook && workbook.name);
+  var linked = [];
+  if (!nameNorm) return linked;
+  for (var f = 0; f < folders.length; f++) {
+    if (folderMatchesWorkbook_(normalizePropertyName_(folders[f].name), nameNorm)) linked.push(folders[f]);
+  }
+  return linked;
+}
+
+function workbookFromCatalog_(catalog, workbookId, folderId) {
+  var wanted = String(workbookId || '').trim();
+  if (!wanted || !catalog) return null;
+  var wb = null;
+  var books = catalog.workbooks || [];
+  for (var i = 0; i < books.length; i++) {
+    if (books[i].id === wanted) { wb = books[i]; break; }
+  }
+  if (!wb) return null;
+  var folder = null;
+  var folders = catalog.folders || [];
+  var wantedFolder = String(folderId || '').trim();
+  if (wantedFolder) {
+    for (var f = 0; f < folders.length; f++) {
+      if (folders[f].id === wantedFolder) { folder = folders[f]; break; }
+    }
+  }
+  if (!folder) {
+    var linked = foldersForWorkbook_(wb, folders);
+    if (linked.length === 1) folder = linked[0];
+  }
+  return { confident: true, workbook: wb, folder: folder, choices: [] };
+}
+
+function campaignCatalog_() {
+  var cached = readCatalogCache_();
+  if (cached) return cached;
+  var root = DriveApp.getFolderById(CONFIG.CAMPAIGN_FOLDER_ID);
+  var folders = [];
+  var folderIt = root.getFolders();
+  var guard = 0;
+  while (folderIt.hasNext() && guard < 2000) {
+    var folder = folderIt.next();
+    folders.push({ id: folder.getId(), name: folder.getName() });
+    guard++;
+  }
+  var workbooks = [];
+  var fileIt = root.getFilesByType(MimeType.GOOGLE_SHEETS);
+  guard = 0;
+  while (fileIt.hasNext() && guard < 2000) {
+    var file = fileIt.next();
+    workbooks.push({ id: file.getId(), name: file.getName() });
+    guard++;
+  }
+  var catalog = { workbooks: workbooks, folders: folders };
+  writeCatalogCache_(catalog);
+  return catalog;
+}
+
+function readCatalogCache_() {
+  try {
+    var cache = CacheService.getScriptCache();
+    var partCount = Number(cache.get('pnCatN') || '0');
+    if (!partCount) return null;
+    var keys = [];
+    for (var i = 0; i < partCount; i++) keys.push('pnCat' + i);
+    var parts = cache.getAll(keys);
+    var json = '';
+    for (var j = 0; j < partCount; j++) {
+      if (!parts['pnCat' + j]) return null;
+      json += parts['pnCat' + j];
+    }
+    var parsed = JSON.parse(json);
+    if (!parsed || !parsed.workbooks || !parsed.folders) return null;
+    return parsed;
+  } catch (err) {
+    return null;
+  }
+}
+
+function writeCatalogCache_(catalog) {
+  try {
+    var cache = CacheService.getScriptCache();
+    var json = JSON.stringify(catalog);
+    var size = 80000;
+    var values = {};
+    var n = 0;
+    for (var i = 0; i < json.length; i += size) {
+      values['pnCat' + n] = json.substring(i, i + size);
+      n++;
+    }
+    if (!n) return;
+    cache.put('pnCatN', String(n), 1800);
+    cache.putAll(values, 1800);
+  } catch (err) {}
+}
+
+function listCampaignWorkbooks_() {
+  var catalog = campaignCatalog_();
+  var list = [];
+  for (var i = 0; i < catalog.workbooks.length; i++) {
+    var wb = catalog.workbooks[i];
+    var linked = foldersForWorkbook_(wb, catalog.folders);
+    var folder = linked.length === 1 ? linked[0] : chooseCampaignFolder_({ linked: linked }, '');
+    list.push({
+      id: wb.id,
+      name: wb.name,
+      folderId: folder ? folder.id : '',
+      folderName: folder ? folder.name : '',
+    });
+  }
+  list.sort(function (a, b) {
+    var an = String(a.name || '').toLowerCase();
+    var bn = String(b.name || '').toLowerCase();
+    if (an < bn) return -1;
+    if (an > bn) return 1;
+    return 0;
+  });
+  return { success: true, workbooks: list };
+}
+
+function aliasSheet_() {
+  var ss = getSpreadsheet_();
+  var sheet = ss.getSheetByName(CONFIG.ALIAS_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.ALIAS_SHEET_NAME);
+    sheet.appendRow(['alias', 'workbookId', 'workbookName', 'folderId', 'folderName', 'addressKey', 'city', 'updated']);
+    try { sheet.hideSheet(); } catch (err) {}
+  }
+  return sheet;
+}
+
+function readAliasRows_() {
+  var ss = getSpreadsheet_();
+  var sheet = ss.getSheetByName(CONFIG.ALIAS_SHEET_NAME);
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  var values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 8).getValues();
+  var rows = [];
+  for (var i = 0; i < values.length; i++) {
+    if (!values[i][0] && !values[i][1]) continue;
+    rows.push({
+      rowIndex: i + 2,
+      alias: String(values[i][0] || ''),
+      workbookId: String(values[i][1] || ''),
+      workbookName: String(values[i][2] || ''),
+      folderId: String(values[i][3] || ''),
+      folderName: String(values[i][4] || ''),
+      addressKey: String(values[i][5] || ''),
+      city: String(values[i][6] || ''),
+    });
+  }
+  return rows;
+}
+
+function aliasForText_(property) {
+  var key = normalizePropertyName_(property);
+  if (!key) return null;
+  var rows = readAliasRows_();
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].alias === key && rows[i].workbookId) return rows[i];
+  }
+  return null;
+}
+
+function aliasAddressHints_(location) {
+  var addr = parseAddress_(location);
+  var key = addressKey_(addr);
+  if (!key) return [];
+  var rows = readAliasRows_();
+  var hints = [];
+  var seen = {};
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].addressKey !== key || !rows[i].workbookId || seen[rows[i].workbookId]) continue;
+    seen[rows[i].workbookId] = true;
+    hints.push({
+      workbookId: rows[i].workbookId,
+      number: addr.number,
+      street: addr.street.slice(),
+      city: addr.city,
+    });
+  }
+  return hints;
+}
+
+function saveAlias_(property, location, picked) {
+  var key = normalizePropertyName_(property);
+  if (!key || !picked || !picked.workbook) return;
+  var addr = parseAddress_(location);
+  var sheet = aliasSheet_();
+  var rows = readAliasRows_();
+  var folder = picked.folder;
+  var record = [
+    key,
+    picked.workbook.id,
+    picked.workbook.name,
+    folder ? folder.id : '',
+    folder ? folder.name : '',
+    addressKey_(addr),
+    addr.city || '',
+    new Date(),
+  ];
+  var existing = null;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].alias === key) { existing = rows[i]; break; }
+  }
+  if (existing) sheet.getRange(existing.rowIndex, 1, 1, 8).setValues([record]);
+  else sheet.appendRow(record);
+}
+
+function masterAddressHints_(location, catalog) {
+  var addr = parseAddress_(location);
+  if (!addr.number || !addr.street.length || !catalog) return [];
+  var sheet = getRowsSheet_();
+  if (sheet.getLastRow() < 2) return [];
+  var header = headerCells_(sheet);
+  var locCol = headerIndex_(header, 'location');
+  var propCol = headerIndex_(header, 'property');
+  if (locCol < 0 || propCol < 0) return [];
+  var found = [];
+  try {
+    found = sheet.getRange(1, locCol + 1, sheet.getLastRow(), 1).createTextFinder(String(addr.number)).findAll();
+  } catch (err) {
+    return [];
+  }
+  var props = {};
+  var seen = 0;
+  for (var i = 0; i < found.length && seen < 40; i++) {
+    var row = found[i].getRow();
+    if (row < 2) continue;
+    seen++;
+    var locText = String(sheet.getRange(row, locCol + 1).getDisplayValue() || '');
+    if (addressKey_(parseAddress_(locText)) !== addressKey_(addr)) continue;
+    var prop = String(sheet.getRange(row, propCol + 1).getDisplayValue() || '').trim();
+    var norm = normalizePropertyName_(prop);
+    if (norm) props[norm] = prop;
+  }
+  var names = [];
+  for (var key in props) {
+    if (Object.prototype.hasOwnProperty.call(props, key)) names.push(props[key]);
+  }
+  if (names.length !== 1) return [];
+  var named = pickPropertyMatch_(names[0], '', catalog.workbooks, catalog.folders, []);
+  if (!named.confident || !named.workbook) return [];
+  return [{
+    workbookId: named.workbook.id,
+    number: addr.number,
+    street: addr.street.slice(),
+    city: addr.city,
+  }];
 }
 
 function fileSessionRows_(ids, workbook) {

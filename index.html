@@ -185,6 +185,8 @@
   .btn-secondary:hover { background: #f5f5f5; }
   .btn-secondary:active { transform: scale(0.98); }
   .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  .match-choice { justify-content: flex-start; text-align: left; min-height: 48px; height: auto; padding: 10px 12px; flex-direction: column; align-items: flex-start; gap: 2px; }
+  .match-choice small { font-weight: 400; color: var(--text-muted); font-size: 12px; }
 
   .btn-row {
     display: grid;
@@ -560,6 +562,18 @@
     </div>
   </div>
 
+  <div id="matchSheet" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.25);z-index:450;align-items:flex-end;justify-content:center;">
+    <div style="background:#fff;border-radius:20px 20px 0 0;padding:18px 16px 22px;width:100%;max-width:480px;max-height:92%;display:flex;flex-direction:column;gap:10px;box-shadow:0 -4px 24px rgba(0,0,0,.1);" onclick="event.stopPropagation()">
+      <div style="font-size:18px;font-weight:700;">Did you mean…?</div>
+      <div id="matchSubtitle" style="font-size:13px;color:#555;"></div>
+      <div id="matchCandidates" style="display:flex;flex-direction:column;gap:8px;overflow:auto;max-height:28vh;"></div>
+      <input class="field-input" id="matchSearch" type="search" placeholder="Search all properties" autocomplete="off" enterkeyhint="search" style="font-size:16px;">
+      <div id="matchSearchStatus" style="font-size:12px;color:#888;min-height:0;"></div>
+      <div id="matchResults" style="display:flex;flex-direction:column;gap:8px;overflow:auto;min-height:0;"></div>
+      <button class="btn btn-secondary" id="matchKeep" type="button" onclick="keepMatchInPhotoNotes()">New property / keep in PhotoNotes</button>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -847,7 +861,6 @@ async function endSession() {
   if (capturing) return;
   capturing = true;
   let proceed = false;
-  let filingId = '';
   try {
     // Queue the open entry first. End Session never deletes the queue.
     const result = await submitCurrentEntry();
@@ -858,28 +871,16 @@ async function endSession() {
       alert('No photos in this session.');
     } else {
       showSendToast('sending', 'Filing session...');
-      const queued = [];
       for (let i = 0; i < sessions.length; i++) {
-        queued.push(await enqueueEndSession(sessions[i]));
+        await fileSessionChoice(sessions[i]);
       }
       clearFiledSessions(sessions);
-      filingId = queued[queued.length - 1].id;
-      if (!navigator.onLine) {
-        alert('You\'re offline. This session is saved on this phone and will be filed when you have a signal. Do not clear this site\'s data.');
-      } else {
-        endSessionWaiters[filingId] = true;
-        const filed = await waitForEndSession(filingId, 90000);
-        delete endSessionWaiters[filingId];
-        if (filed && filed.message) alert(filed.message);
-        else alert('Still uploading. This session will be filed when the photos finish, and a message will appear then. Do not clear this site\'s data.');
-      }
     }
   } catch (err) {
     showSendToast('failed', '✗ Could not save on this phone — try again');
     proceed = false;
     return;
   } finally {
-    if (filingId) delete endSessionWaiters[filingId];
     capturing = false;
   }
   if (!proceed) return;
@@ -951,6 +952,8 @@ async function enqueueEndSession(session) {
       location: session.location || '',
       inspector: session.inspector || auth.name,
       ids: session.ids.slice(),
+      workbookId: session.workbookId || '',
+      folderId: session.folderId || '',
     },
     createdAt: createdAt,
     seq: ++enqueueSeq,
@@ -976,6 +979,229 @@ function waitForEndSession(id, ms) {
         else setTimeout(poll, 300);
       });
     })();
+  });
+}
+
+function offlineFilingMessage() {
+  return 'You\'re offline. This session is saved on this phone and will be filed when you have a signal. Do not clear this site\'s data.';
+}
+
+function stillFilingMessage() {
+  return 'Still uploading. This session will be filed when the photos finish, and a message will appear then. Do not clear this site\'s data.';
+}
+
+async function fileSessionChoice(session) {
+  const queued = await enqueueEndSession(session);
+  if (!navigator.onLine) {
+    alert(offlineFilingMessage());
+    return;
+  }
+  endSessionWaiters[queued.id] = true;
+  let filed = null;
+  try {
+    filed = await waitForEndSession(queued.id, 90000);
+  } finally {
+    delete endSessionWaiters[queued.id];
+  }
+  if (!filed) {
+    alert(stillFilingMessage());
+    return;
+  }
+  if (!filed.needsChoice) {
+    if (filed.message) alert(filed.message);
+    return;
+  }
+  const choice = await showMatchChooser(session, filed);
+  if (!choice) {
+    clearPendingChoice();
+    alert(filed.message || 'Photos left in PhotoNotes');
+    return;
+  }
+  const confirm = {
+    property: session.property,
+    location: session.location,
+    inspector: session.inspector,
+    ids: (session.ids || []).slice(),
+    workbookId: choice.workbookId,
+    folderId: choice.folderId || '',
+  };
+  const again = await enqueueEndSession(confirm);
+  clearPendingChoice();
+  if (!navigator.onLine) {
+    alert(offlineFilingMessage());
+    return;
+  }
+  endSessionWaiters[again.id] = true;
+  let moved = null;
+  try {
+    moved = await waitForEndSession(again.id, 90000);
+  } finally {
+    delete endSessionWaiters[again.id];
+  }
+  if (moved && moved.message) alert(moved.message);
+  else alert(stillFilingMessage());
+}
+
+var matchChooser = null;
+var campaignList = null;
+var campaignListPromise = null;
+
+function rememberPendingChoice(item, result) {
+  if (!result || !result.needsChoice) return;
+  writeStoredJson('pnPendingChoice', {
+    property: (item.row && item.row.property) || '',
+    location: (item.row && item.row.location) || '',
+    inspector: (item.row && item.row.inspector) || '',
+    ids: ((item.row && item.row.ids) || []).slice(),
+    candidates: result.candidates || [],
+    message: result.message || '',
+  });
+}
+
+function clearPendingChoice() {
+  try { localStorage.removeItem('pnPendingChoice'); } catch (err) {}
+}
+
+function showMatchChooser(session, filed) {
+  if (matchChooser) return matchChooser.promise;
+  const typed = session && session.property ? session.property : 'this property';
+  document.getElementById('matchSubtitle').textContent = 'No confident match for “' + typed + '”.';
+  const list = document.getElementById('matchCandidates');
+  list.innerHTML = '';
+  const candidates = (filed && filed.candidates) || (session && session.candidates) || [];
+  candidates.forEach(function (item) { list.appendChild(matchChoiceButton(item)); });
+  const search = document.getElementById('matchSearch');
+  search.value = '';
+  document.getElementById('matchResults').innerHTML = '';
+  document.getElementById('matchSearchStatus').textContent = '';
+  document.getElementById('matchSheet').style.display = 'flex';
+  let resolveChoice;
+  const promise = new Promise(function (resolve) { resolveChoice = resolve; });
+  matchChooser = { resolve: resolveChoice, promise: promise, session: session };
+  loadMatchCatalog();
+  return promise;
+}
+
+function matchChoiceButton(item) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-secondary match-choice';
+  const name = document.createElement('span');
+  name.textContent = item.name || 'Untitled';
+  btn.appendChild(name);
+  if (item.folderName) {
+    const sub = document.createElement('small');
+    sub.textContent = item.folderName;
+    btn.appendChild(sub);
+  }
+  btn.addEventListener('click', function () {
+    settleMatchChoice({
+      workbookId: item.workbookId || item.id,
+      folderId: item.folderId || '',
+      name: item.name || '',
+    });
+  });
+  return btn;
+}
+
+function settleMatchChoice(choice) {
+  const current = matchChooser;
+  if (!current) return;
+  matchChooser = null;
+  document.getElementById('matchSheet').style.display = 'none';
+  current.resolve(choice || null);
+}
+
+function keepMatchInPhotoNotes() {
+  settleMatchChoice(null);
+}
+
+function normalizeSearchText(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function renderMatchSearch(query) {
+  const box = document.getElementById('matchResults');
+  const status = document.getElementById('matchSearchStatus');
+  box.innerHTML = '';
+  const q = normalizeSearchText(query);
+  if (!q) {
+    if (campaignList) status.textContent = '';
+    return;
+  }
+  if (!campaignList) return;
+  const tokens = q.split(' ');
+  let shown = 0;
+  for (let i = 0; i < campaignList.length && shown < 20; i++) {
+    const name = normalizeSearchText(campaignList[i].name);
+    let ok = true;
+    for (let t = 0; t < tokens.length; t++) {
+      if (name.indexOf(tokens[t]) === -1) ok = false;
+    }
+    if (!ok) continue;
+    box.appendChild(matchChoiceButton(campaignList[i]));
+    shown++;
+  }
+  status.textContent = shown ? '' : 'No property with that name.';
+}
+
+function loadMatchCatalog() {
+  if (campaignList) return;
+  const status = document.getElementById('matchSearchStatus');
+  status.textContent = 'Loading properties…';
+  if (!campaignListPromise) {
+    campaignListPromise = postJson({ action: 'listCampaignWorkbooks' }).then(function (saved) {
+      if (!saved.success) throw new Error(saved.error || 'list failed');
+      campaignList = (saved.result && saved.result.workbooks) || [];
+      return campaignList;
+    }, function (err) {
+      campaignListPromise = null;
+      throw err;
+    });
+  }
+  campaignListPromise.then(function () {
+    if (!matchChooser) return;
+    status.textContent = '';
+    renderMatchSearch(document.getElementById('matchSearch').value);
+  }, function () {
+    if (!matchChooser) return;
+    status.textContent = 'Property list didn’t load. Suggestions above still work.';
+  });
+}
+
+function resolvePendingChoice(pending, choice) {
+  if (!choice) {
+    clearPendingChoice();
+    alert((pending && pending.message) || 'Photos left in PhotoNotes');
+    return;
+  }
+  enqueueEndSession({
+    property: pending.property,
+    location: pending.location,
+    inspector: pending.inspector,
+    ids: pending.ids || [],
+    workbookId: choice.workbookId,
+    folderId: choice.folderId || '',
+  }).then(function (queued) {
+    clearPendingChoice();
+    if (!navigator.onLine) {
+      alert(offlineFilingMessage());
+      return;
+    }
+    endSessionWaiters[queued.id] = true;
+    waitForEndSession(queued.id, 90000).then(function (filed) {
+      delete endSessionWaiters[queued.id];
+      if (filed && filed.message) alert(filed.message);
+      else alert(stillFilingMessage());
+    });
+  });
+}
+
+function resumePendingChoice() {
+  const pending = readStoredJson('pnPendingChoice');
+  if (!pending || !pending.ids || !pending.ids.length || matchChooser) return;
+  showMatchChooser(pending, pending).then(function (choice) {
+    resolvePendingChoice(pending, choice);
   });
 }
 
@@ -1758,10 +1984,19 @@ async function endSessionWaitingOnPhotos(item) {
   return true;
 }
 
-function finishEndSession(id, message) {
+function finishEndSession(id, message, result) {
   if (!id || !message) return;
-  endSessionResults[id] = { message: message };
+  endSessionResults[id] = {
+    message: message,
+    needsChoice: !!(result && result.needsChoice),
+    candidates: (result && result.candidates) || [],
+    matched: !!(result && result.matched),
+  };
   if (endSessionWaiters[id]) return;
+  if (endSessionResults[id].needsChoice) {
+    resumePendingChoice();
+    return;
+  }
   alert(message);
 }
 
@@ -1819,17 +2054,21 @@ async function postJson(payload, signal) {
 
 async function deliverItem(item, signal) {
   if (item.kind === 'endSession') {
-    var saved = await postJson({
+    var payload = {
       action: 'endSession',
       id: item.id,
       property: item.row.property || '',
       location: item.row.location || '',
       inspector: item.row.inspector || '',
       ids: item.row.ids || [],
-    }, signal);
+    };
+    if (item.row.workbookId) payload.workbookId = item.row.workbookId;
+    if (item.row.folderId) payload.folderId = item.row.folderId;
+    var saved = await postJson(payload, signal);
     if (!saved.success) return { ok: false, error: saved.error || 'endSession failed' };
     var message = (saved.result && saved.result.message) || 'Session filed.';
-    finishEndSession(item.id, message);
+    rememberPendingChoice(item, saved.result);
+    finishEndSession(item.id, message, saved.result);
     return { ok: true };
   }
 
@@ -1965,6 +2204,10 @@ window.addEventListener('beforeunload', function (e) {
     e.returnValue = 'Photos are still waiting to upload on this phone.';
   }
 });
+document.getElementById('matchSearch').addEventListener('input', function () {
+  renderMatchSearch(this.value);
+});
+resumePendingChoice();
 kickQueue();
 </script>
 </body>
